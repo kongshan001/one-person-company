@@ -19,7 +19,7 @@ import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Thread
+from threading import Thread, Lock
 
 
 # ============ 配置 ============
@@ -51,7 +51,7 @@ class PasteStore:
         self._views_dirty = {}  # paste_id -> pending view count
         self._views_total_dirty = 0
         self._last_flush = time.time()
-        self._flush_lock = __import__('threading').Lock()
+        self._flush_lock = Lock()
     
     def _load_meta(self) -> dict:
         if self.meta_file.exists():
@@ -353,6 +353,10 @@ class PasteHandler(BaseHTTPRequestHandler):
         # DELETE /api/paste/{id}
         if path.path.startswith("/api/paste/"):
             paste_id = path.path[len("/api/paste/"):]
+            # 输入校验：paste_id 必须是十六进制
+            if not re.fullmatch(r'[a-f0-9]+', paste_id):
+                self._send_json({"error": "Invalid paste ID"}, 400)
+                return
             # 从 query string 或 header 获取 delete_key
             parsed = urllib.parse.urlparse(self.path)
             params = urllib.parse.parse_qs(parsed.query)

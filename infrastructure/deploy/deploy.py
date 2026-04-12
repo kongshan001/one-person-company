@@ -3,9 +3,11 @@
 一键部署脚本 - 将所有产品部署为后台服务
 
 用法:
-  python deploy.py          # 启动所有服务
-  python deploy.py --stop   # 停止所有服务
-  python deploy.py --status # 查看服务状态
+  python deploy.py             # 启动所有服务
+  python deploy.py --stop      # 停止所有服务
+  python deploy.py --restart   # 重启所有服务
+  python deploy.py --status    # 查看服务状态
+  python deploy.py --service NAME  # 操作指定服务
 """
 
 import argparse
@@ -96,17 +98,16 @@ def start_service(name: str, config: dict):
     
     if config["type"] == "http":
         cmd = [sys.executable, config["script"], "--port", str(config["port"])]
-        # 修复：避免文件句柄泄漏，赋给变量并关闭
-        log_file = open(f"/tmp/{name}.log", "w")
+        log_path = f"/tmp/{name}.log"
+        log_file = open(log_path, "w")
         process = subprocess.Popen(
             cmd,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        # 注意：log_file 需要保持打开直到进程结束，但我们不在此处关闭
-        # 将其保存在进程对象上以便后续清理
-        process._log_file = log_file
+        # 子进程已继承文件描述符，父进程关闭句柄避免泄漏
+        log_file.close()
         
         pid_file = PID_DIR / f"{name}.pid"
         pid_file.write_text(str(process.pid))
@@ -167,11 +168,19 @@ def show_status():
     print()
 
 
+def restart_service(name: str, config: dict):
+    """重启单个服务"""
+    stop_service(name)
+    time.sleep(0.5)
+    start_service(name, config)
+
+
 def main():
     parser = argparse.ArgumentParser(description="OnePersonCo Deploy")
     parser.add_argument("--stop", action="store_true", help="Stop all services")
+    parser.add_argument("--restart", action="store_true", help="Restart all services")
     parser.add_argument("--status", action="store_true", help="Show status")
-    parser.add_argument("--service", help="Start/stop specific service")
+    parser.add_argument("--service", help="Start/stop/restart specific service")
     args = parser.parse_args()
     
     if args.status:
@@ -186,7 +195,11 @@ def main():
     
     targets = {args.service: SERVICES[args.service]} if args.service else SERVICES
     
-    if args.stop:
+    if args.restart:
+        print("🔄 Restarting services...")
+        for name, config in targets.items():
+            restart_service(name, config)
+    elif args.stop:
         print("🛑 Stopping services...")
         for name, config in targets.items():
             stop_service(name)
