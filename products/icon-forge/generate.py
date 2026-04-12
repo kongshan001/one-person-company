@@ -24,33 +24,24 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-# ============ 配置 ============
+# 引入集中配置
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config import IconForgeConfig
 
-POLLINATIONS_URL = "https://image.pollinations.ai/prompt/{prompt}?width={w}&height={h}&seed={seed}&nologo=true"
 
-STYLE_KEYWORDS = {
-    "pixel": "pixel art, retro, clean edges, game boy style, 16-bit",
-    "cartoon": "cartoon, cute, bold outlines, flat shading, bright colors, chibi",
-    "realistic": "3D rendered, realistic, detailed texture, dramatic lighting, PBR",
-    "dark": "dark fantasy, gothic, weathered, ominous glow, desaturated, bloodborne style",
-    "anime": "anime RPG, cel shading, pastel, kawaii, clean vector, gacha style",
-    "chinese": "Chinese ink painting, watercolor, traditional, elegant, xianxia",
-    "sci-fi": "sci-fi, cyberpunk, neon glow, holographic, futuristic, clean design",
-}
+# ============ 配置（引用集中配置） ============
 
-TYPE_KEYWORDS = {
-    "icon": "game item icon, isolated on solid background, centered composition",
-    "sprite": "character sprite sheet, multiple poses, transparent background",
-    "background": "game background, panoramic, parallax ready, seamless",
-    "tileset": "tileset, seamless tiles, 16x16 grid, game map element",
-    "ui": "game UI element, button, panel, frame, clean design",
-}
+POLLINATIONS_URL = IconForgeConfig.POLLINATIONS_URL
 
-SIZES = [64, 128, 256, 512]
-DEFAULT_SIZE = 512
-MIN_FILE_SIZE = 5000  # 5KB, 小于此值视为损坏
-DELAY_BETWEEN_REQUESTS = 3  # 秒, 避免限流
-MAX_RETRIES = 2
+STYLE_KEYWORDS = IconForgeConfig.STYLE_KEYWORDS
+
+TYPE_KEYWORDS = IconForgeConfig.TYPE_KEYWORDS
+
+SIZES = IconForgeConfig.SIZES
+DEFAULT_SIZE = IconForgeConfig.DEFAULT_SIZE
+MIN_FILE_SIZE = IconForgeConfig.MIN_FILE_SIZE
+DELAY_BETWEEN_REQUESTS = IconForgeConfig.DELAY_BETWEEN_REQUESTS
+MAX_RETRIES = IconForgeConfig.MAX_RETRIES
 
 
 # ============ 核心函数 ============

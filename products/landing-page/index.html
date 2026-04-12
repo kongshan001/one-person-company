@@ -262,7 +262,7 @@
 <span class="dim">│</span>                   <span class="hl">OnePersonCo</span>                     <span class="dim">│</span>
 <span class="dim">├──────────────┬──────────────┬────────────────────────┤</span>
 <span class="dim">│</span>  <span class="green">IconForge</span>   │  <span class="green">PasteHut</span>     │      <span class="green">PingBot</span>          <span class="dim">│</span>
-<span class="dim">│</span>  :8082       │  :8080       │      :8081             <span class="dim">│</span>
+<span class="dim">│</span>  CLI         │  :9292       │      :8081             <span class="dim">│</span>
 <span class="dim">├──────────────┴──────────────┴────────────────────────┤</span>
 <span class="dim">│</span>              <span class="blue">Infrastructure Layer</span>                    <span class="dim">│</span>
 <span class="dim">│</span>  🔍 health_check  💾 backup_db  🧹 clean_logs    <span class="dim">│</span>
@@ -333,7 +333,7 @@ git clone https://github.com/kongshan001/one-person-company.git
 cd one-person-company
 
 <span class="hl"># Run directly (Python 3.8+)</span>
-python3 products/paste-hut/server.py     <span class="dim"># → http://localhost:8080</span>
+python3 products/paste-hut/server.py     <span class="dim"># → http://localhost:9292</span>
 python3 products/ping-bot/monitor.py     <span class="dim"># → http://localhost:8081</span>
 
 <span class="hl"># Or with Docker</span>

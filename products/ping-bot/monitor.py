@@ -30,16 +30,21 @@ from pathlib import Path
 from threading import Thread
 import threading
 
+# 引入集中配置
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config import PingBotConfig
 
-# ============ 配置 ============
 
-DB_PATH = os.path.expanduser("~/.pingbot/pingbot.db")
-CHECK_INTERVAL = 60  # 秒
-REQUEST_TIMEOUT = 10  # 秒
-MAX_HISTORY_DAYS = 30
-MAX_BODY_READ = 65536  # 64KB, 只读取响应体前 64KB
+# ============ 配置（引用集中配置） ============
 
-ALERT_WEBHOOK_URL = os.environ.get("PINGBOT_ALERT_WEBHOOK", "")
+DB_PATH = PingBotConfig.DB_PATH
+CHECK_INTERVAL = PingBotConfig.CHECK_INTERVAL
+REQUEST_TIMEOUT = PingBotConfig.REQUEST_TIMEOUT
+MAX_HISTORY_DAYS = PingBotConfig.MAX_HISTORY_DAYS
+MAX_BODY_READ = PingBotConfig.MAX_BODY_READ
+
+ALERT_WEBHOOK_URL = PingBotConfig.ALERT_WEBHOOK_URL
 
 
 # ============ 告警通知 ============
@@ -270,7 +275,7 @@ pinger = None
 
 class PingHandler(BaseHTTPRequestHandler):
     
-    API_KEY = os.environ.get("PINGBOT_API_KEY", "")
+    API_KEY = PingBotConfig.API_KEY
     
     def _check_auth(self) -> bool:
         """Check API key for POST/DELETE. Skip if no key configured."""
@@ -432,8 +437,8 @@ load();setInterval(load,30000);
 
 def main():
     parser = argparse.ArgumentParser(description="PingBot - Uptime Monitor")
-    parser.add_argument("--port", type=int, default=8081)
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=PingBotConfig.DEFAULT_PORT)
+    parser.add_argument("--host", default=PingBotConfig.DEFAULT_HOST)
     parser.add_argument("--db", default=DB_PATH)
     args = parser.parse_args()
     

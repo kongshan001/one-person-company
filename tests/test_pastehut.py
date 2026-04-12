@@ -174,6 +174,202 @@ class TestPasteStore(unittest.TestCase):
         self.assertTrue(result)
 
 
+class TestPasteStoreBurnAfterRead(unittest.TestCase):
+    """Test burn-after-read functionality"""
+
+    @classmethod
+    def setUpClass(cls):
+        project_root = Path(__file__).parent.parent
+        import sys
+        sys.path.insert(0, str(project_root / "products" / "paste-hut"))
+        import importlib
+        cls.server_module = importlib.import_module("server")
+        cls.PasteStore = cls.server_module.PasteStore
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="pastehut_bar_test_")
+        self.store = self.PasteStore(self.test_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_burn_after_read_creates_successfully(self):
+        """Test creating a burn-after-read paste"""
+        result = self.store.create(
+            content="secret message",
+            title="Burn Test",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            burn_after_read=True,
+        )
+        self.assertIn("id", result)
+        self.assertTrue(result.get("burn_after_read"))
+
+    def test_burn_after_read_deletes_on_get(self):
+        """Test that burn-after-read paste is deleted after first view"""
+        created = self.store.create(
+            content="self-destructing message",
+            title="BAR",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            burn_after_read=True,
+        )
+        paste_id = created["id"]
+        # First get should work and mark as burned
+        result = self.store.get(paste_id)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.get("_burned"))
+        self.assertEqual(result["content"], "self-destructing message")
+        # Second get should return None (deleted)
+        result2 = self.store.get(paste_id)
+        self.assertIsNone(result2)
+
+    def test_normal_paste_not_burned(self):
+        """Test that normal paste is not affected by burn-after-read"""
+        created = self.store.create(
+            content="normal message",
+            title="Normal",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            burn_after_read=False,
+        )
+        paste_id = created["id"]
+        # Should be viewable multiple times
+        self.store.get(paste_id)
+        self.store.get(paste_id)
+        result = self.store.get(paste_id)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.get("_burned", False))
+
+
+class TestPasteStorePassword(unittest.TestCase):
+    """Test password protection functionality"""
+
+    @classmethod
+    def setUpClass(cls):
+        project_root = Path(__file__).parent.parent
+        import sys
+        sys.path.insert(0, str(project_root / "products" / "paste-hut"))
+        import importlib
+        cls.server_module = importlib.import_module("server")
+        cls.PasteStore = cls.server_module.PasteStore
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="pastehut_pw_test_")
+        self.store = self.PasteStore(self.test_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_create_with_password(self):
+        """Test creating a password-protected paste"""
+        result = self.store.create(
+            content="secret content",
+            title="Protected",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            password="mypass123",
+        )
+        self.assertIn("id", result)
+        self.assertTrue(result.get("has_password"))
+        # password_hash should not be in the result
+        self.assertNotIn("password_hash", result)
+
+    def test_get_without_password_returns_error(self):
+        """Test that getting a protected paste without password returns error"""
+        created = self.store.create(
+            content="locked",
+            title="Locked",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            password="mypass123",
+        )
+        paste_id = created["id"]
+        result = self.store.get(paste_id)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("error"), "password_required")
+
+    def test_get_with_wrong_password_returns_error(self):
+        """Test that getting a protected paste with wrong password returns error"""
+        created = self.store.create(
+            content="locked",
+            title="Locked",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            password="mypass123",
+        )
+        paste_id = created["id"]
+        result = self.store.get(paste_id, password="wrongpass")
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("error"), "wrong_password")
+
+    def test_get_with_correct_password(self):
+        """Test that getting a protected paste with correct password works"""
+        created = self.store.create(
+            content="locked content",
+            title="Locked",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            password="mypass123",
+        )
+        paste_id = created["id"]
+        result = self.store.get(paste_id, password="mypass123")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["content"], "locked content")
+        # password_hash should not leak
+        self.assertNotIn("password_hash", result)
+
+    def test_create_without_password(self):
+        """Test creating a paste without password (default)"""
+        result = self.store.create(
+            content="open content",
+            title="Open",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+        )
+        self.assertFalse(result.get("has_password"))
+
+    def test_password_hash_is_stored_in_meta(self):
+        """Test that password hash is stored internally but not exposed"""
+        created = self.store.create(
+            content="secret",
+            title="Secret",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            password="testpw",
+        )
+        paste_id = created["id"]
+        # Internal meta should have password_hash
+        self.assertIn("password_hash", self.store.meta[paste_id])
+        self.assertTrue(len(self.store.meta[paste_id]["password_hash"]) > 0)
+
+    def test_list_recent_excludes_sensitive_fields(self):
+        """Test that list_recent does not expose password_hash or delete_key"""
+        self.store.create(
+            content="secret",
+            title="Secret",
+            syntax="text",
+            expiry_hours=24,
+            ip="127.0.0.1",
+            password="testpw",
+        )
+        pastes = self.store.list_recent()
+        self.assertEqual(len(pastes), 1)
+        self.assertNotIn("password_hash", pastes[0])
+        self.assertNotIn("delete_key", pastes[0])
+        self.assertNotIn("ip", pastes[0])
+        self.assertTrue(pastes[0].get("has_password"))
+
+
 class TestPasteStoreIdGeneration(unittest.TestCase):
     """Test paste ID generation uniqueness"""
 

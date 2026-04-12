@@ -21,21 +21,26 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Thread, Lock
 
+# 引入集中配置
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config import PasteHutConfig
 
-# ============ 配置 ============
 
-DATA_DIR = os.path.expanduser("~/.pastehut/data")
-MAX_PASTE_SIZE = 512 * 1024  # 512KB
-DEFAULT_EXPIRY_HOURS = 24 * 7  # 7天
-MAX_EXPIRY_HOURS = 24 * 30  # 30天
-RATE_LIMIT_WINDOW = 60  # 秒
-RATE_LIMIT_MAX = 10  # 每分钟最多10条
+# ============ 配置（引用集中配置） ============
 
-ALLOWED_SYNTAXES = {"text", "python", "javascript", "html", "css", "json", "sql", "bash"}
+DATA_DIR = PasteHutConfig.DATA_DIR
+MAX_PASTE_SIZE = PasteHutConfig.MAX_PASTE_SIZE
+DEFAULT_EXPIRY_HOURS = PasteHutConfig.DEFAULT_EXPIRY_HOURS
+MAX_EXPIRY_HOURS = PasteHutConfig.MAX_EXPIRY_HOURS
+RATE_LIMIT_WINDOW = PasteHutConfig.RATE_LIMIT_WINDOW
+RATE_LIMIT_MAX = PasteHutConfig.RATE_LIMIT_MAX
+
+ALLOWED_SYNTAXES = PasteHutConfig.ALLOWED_SYNTAXES
 
 # Views flush 配置
-VIEWS_FLUSH_INTERVAL = 10  # 每 10 次视图递增 flush 一次
-VIEWS_FLUSH_SECONDS = 30   # 或每 30 秒 flush 一次
+VIEWS_FLUSH_INTERVAL = PasteHutConfig.VIEWS_FLUSH_INTERVAL
+VIEWS_FLUSH_SECONDS = PasteHutConfig.VIEWS_FLUSH_SECONDS
 
 
 # ============ 存储 ============
@@ -116,9 +121,29 @@ class PasteStore:
         self.rate_limits[ip].append(now)
         return True
     
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        """对密码进行 SHA-256 哈希（加盐）"""
+        salt = "pastehut_salt_2024"
+        return hashlib.sha256((salt + password).encode()).hexdigest()
+    
     def create(self, content: str, title: str = "", syntax: str = "text",
-               expiry_hours: int = None, ip: str = "unknown") -> dict:
-        """创建 paste"""
+               expiry_hours: int = None, ip: str = "unknown",
+               burn_after_read: bool = False, password: str = "") -> dict:
+        """创建 paste
+        
+        Args:
+            content: 粘贴内容
+            title: 标题（可选）
+            syntax: 语法高亮类型
+            expiry_hours: 过期时间（小时）
+            ip: 创建者 IP
+            burn_after_read: 阅后即焚，首次查看后自动删除
+            password: 访问密码（可选，空字符串表示无密码）
+        
+        Returns:
+            创建结果字典，含 id、delete_key 等；失败时含 error
+        """
         if len(content) > MAX_PASTE_SIZE:
             return {"error": f"内容超过限制 ({MAX_PASTE_SIZE // 1024}KB)"}
         
@@ -148,6 +173,13 @@ class PasteStore:
         paste_file = self.data_dir / f"{paste_id}.txt"
         paste_file.write_text(content)
         
+        # 处理密码哈希
+        password_hash = ""
+        has_password = False
+        if password and password.strip():
+            password_hash = self._hash_password(password.strip())
+            has_password = True
+        
         # 保存元数据
         self.meta[paste_id] = {
             "id": paste_id,
@@ -159,15 +191,28 @@ class PasteStore:
             "ip": ip,
             "views": 0,
             "delete_key": delete_key,
+            "burn_after_read": burn_after_read,
+            "has_password": has_password,
+            "password_hash": password_hash,
         }
         self._save_meta()
         
         result = dict(self.meta[paste_id])
         result["delete_key"] = delete_key  # 创建时返回 delete_key
+        # 不返回密码哈希给客户端
+        result.pop("password_hash", None)
         return result
     
-    def get(self, paste_id: str) -> dict:
-        """获取 paste（views 使用延迟批量写入）"""
+    def get(self, paste_id: str, password: str = "") -> dict:
+        """获取 paste（views 使用延迟批量写入）
+        
+        Args:
+            paste_id: 粘贴 ID
+            password: 访问密码（如果有密码保护则必填）
+        
+        Returns:
+            粘贴内容字典，不存在或密码错误返回 None
+        """
         if paste_id not in self.meta:
             return None
         
@@ -178,6 +223,13 @@ class PasteStore:
         if datetime.now(timezone.utc) > expires_at:
             self.delete(paste_id)
             return None
+        
+        # 密码验证
+        if meta.get("has_password"):
+            if not password or not password.strip():
+                return {"error": "password_required", "message": "此粘贴需要密码访问"}
+            if self._hash_password(password.strip()) != meta.get("password_hash", ""):
+                return {"error": "wrong_password", "message": "密码错误"}
         
         # 读取内容
         paste_file = self.data_dir / f"{paste_id}.txt"
@@ -195,6 +247,15 @@ class PasteStore:
         result = dict(meta)
         result["content"] = paste_file.read_text()
         result["views"] = current_views
+        # 不返回密码哈希
+        result.pop("password_hash", None)
+        
+        # 阅后即焚：首次查看后自动删除
+        if meta.get("burn_after_read"):
+            # 先 flush views 以确保数据完整
+            self._flush_views()
+            self.delete(paste_id)
+            result["_burned"] = True  # 标记已焚毁，前端可提示
         
         self._maybe_flush_views()
         
@@ -239,13 +300,18 @@ class PasteStore:
         return len(expired)
     
     def list_recent(self, limit: int = 20) -> list:
-        """列出最近的 paste"""
+        """列出最近的 paste（不含敏感字段）"""
         pastes = sorted(
             self.meta.values(),
             key=lambda x: x["created_at"],
             reverse=True,
         )
-        return pastes[:limit]
+        # 过滤敏感字段
+        safe_fields = {"id", "title", "syntax", "size", "created_at", "expires_at", "views", "burn_after_read", "has_password"}
+        result = []
+        for p in pastes[:limit]:
+            result.append({k: v for k, v in p.items() if k in safe_fields})
+        return result
 
 
 # ============ HTTP 服务 ============
@@ -255,29 +321,44 @@ store = None  # 全局 store 实例
 
 class PasteHandler(BaseHTTPRequestHandler):
     
+    def _send_cors_headers(self):
+        """发送 CORS 跨域头（与 PingBot 一致）"""
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Delete-Key")
+        self.send_header("Access-Control-Max-Age", "86400")
+    
+    def do_OPTIONS(self):
+        """处理 CORS 预检请求"""
+        self.send_response(204)
+        self._send_cors_headers()
+        self.end_headers()
+    
     def _send_json(self, data, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
     
     def _send_html(self, html, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(html.encode())
     
     def _send_text(self, text, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(text.encode())
     
     def do_GET(self):
         path = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(path.query)
+        password = params.get("password", [""])[0]
         
         if path.path == "/" or path.path == "":
             # 首页 - 创建表单
@@ -292,16 +373,28 @@ class PasteHandler(BaseHTTPRequestHandler):
             if not re.fullmatch(r'[a-f0-9]+', paste_id):
                 self._send_json({"error": "Invalid paste ID"}, 400)
                 return
-            paste = store.get(paste_id)
-            if paste:
-                self._send_text(paste["content"])
-            else:
+            paste = store.get(paste_id, password=password)
+            if paste is None:
                 self._send_json({"error": "Not found"}, 404)
+            elif isinstance(paste, dict) and paste.get("error") == "password_required":
+                self._send_json({"error": "Password required"}, 401)
+            elif isinstance(paste, dict) and paste.get("error") == "wrong_password":
+                self._send_json({"error": "Wrong password"}, 403)
+            else:
+                self._send_text(paste["content"])
         elif path.path.startswith("/"):
             paste_id = path.path[1:]
-            paste = store.get(paste_id)
-            if paste:
-                self._send_html(self._render_paste(paste))
+            # 跳过静态资源路径
+            if paste_id and re.fullmatch(r'[a-f0-9]+', paste_id):
+                paste = store.get(paste_id, password=password)
+                if paste is None:
+                    self._send_html(self._render_404(), 404)
+                elif isinstance(paste, dict) and paste.get("error") == "password_required":
+                    self._send_html(self._render_password_prompt(paste_id), 401)
+                elif isinstance(paste, dict) and paste.get("error") == "wrong_password":
+                    self._send_html(self._render_password_prompt(paste_id, wrong=True), 403)
+                else:
+                    self._send_html(self._render_paste(paste))
             else:
                 self._send_html(self._render_404(), 404)
     
@@ -340,6 +433,8 @@ class PasteHandler(BaseHTTPRequestHandler):
             syntax=data.get("syntax", "text"),
             expiry_hours=int(data.get("expiry_hours", DEFAULT_EXPIRY_HOURS)),
             ip=ip,
+            burn_after_read=bool(data.get("burn_after_read", False)),
+            password=data.get("password", ""),
         )
         
         if "error" in result:
@@ -392,13 +487,15 @@ button:hover{background:#c81e45}a{color:#0f3460}
 <input id="t" name="title" placeholder="Title (optional)">
 <select id="s" name="syntax"><option value="text">Plain Text</option><option value="python">Python</option><option value="javascript">JavaScript</option><option value="html">HTML</option><option value="css">CSS</option><option value="json">JSON</option><option value="sql">SQL</option><option value="bash">Bash</option></select>
 <select id="e" name="expiry_hours"><option value="24">24 hours</option><option value="168" selected>7 days</option><option value="720">30 days</option></select>
+<label style="cursor:pointer"><input type="checkbox" id="bar" name="burn_after_read"> 🔥 Burn after read</label>
+<input id="pw" name="password" type="password" placeholder="Password (optional)">
 <button type="submit">🚀 Create Paste</button>
 </form>
 <div id="r" class="recent"></div>
 <script>
 document.getElementById('f').onsubmit=async(e)=>{
 e.preventDefault();
-const d={content:document.getElementById('c').value,title:document.getElementById('t').value,syntax:document.getElementById('s').value,expiry_hours:document.getElementById('e').value};
+const d={content:document.getElementById('c').value,title:document.getElementById('t').value,syntax:document.getElementById('s').value,expiry_hours:document.getElementById('e').value,burn_after_read:document.getElementById('bar').checked,password:document.getElementById('pw').value};
 const res=await fetch('/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
 const j=await res.json();if(j.id){if(j.delete_key){console.log('Delete key:',j.delete_key);}location.href='/'+j.id;}else alert(j.error||'Error');
 };
@@ -411,6 +508,14 @@ if(d.pastes&&d.pastes.length){el.innerHTML='<h3>Recent</h3>'+d.pastes.map(p=>'<d
     def _render_paste(self, paste):
         import html as html_module
         escaped = html_module.escape(paste["content"])
+        # 阅后即焚警告
+        burn_warning = ""
+        if paste.get("_burned"):
+            burn_warning = '<div style="background:#c81e45;color:#fff;padding:12px;border-radius:4px;margin-bottom:16px">🔥 This was a burn-after-read paste and has been permanently deleted. Copy the content now — it won\'t be available again!</div>'
+        elif paste.get("burn_after_read"):
+            burn_warning = '<div style="background:#ff9800;color:#000;padding:8px;border-radius:4px;margin-bottom:16px">🔥 Burn after read — this paste will be deleted after viewing</div>'
+        # 密码标识
+        password_badge = ' 🔒' if paste.get("has_password") else ''
         return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{html_module.escape(paste['title'])} - PasteHut</title>
 <style>
@@ -420,7 +525,8 @@ pre{{background:#16213e;padding:16px;border-radius:4px;overflow-x:auto;white-spa
 a{{color:#e94560}}.actions{{margin-top:16px}}
 button{{background:#16213e;color:#eee;border:1px solid #333;padding:8px 16px;border-radius:4px;cursor:pointer}}
 </style></head><body>
-<h1>{html_module.escape(paste['title'])}</h1>
+<h1>{html_module.escape(paste['title'])}{password_badge}</h1>
+{burn_warning}
 <div class="meta">
   📝 {paste['syntax']} · {paste['size']}B · 👀 {paste['views']} views · 
   📅 {paste['created_at'][:10]} · ⏰ expires {paste['expires_at'][:10]}
@@ -431,6 +537,27 @@ button{{background:#16213e;color:#eee;border:1px solid #333;padding:8px 16px;bor
   <a href="/raw/{paste['id']}"><button>⬇️ Raw</button></a>
   <a href="/"><button>🏠 Home</button></a>
 </div>
+</body></html>"""
+    
+    def _render_password_prompt(self, paste_id: str, wrong: bool = False):
+        """渲染密码输入页面"""
+        error_msg = '<p style="color:#e94560">❌ 密码错误，请重试</p>' if wrong else '<p>🔒 此粘贴需要密码才能访问</p>'
+        return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>密码验证 - PasteHut</title>
+<style>
+body{{font-family:monospace;background:#1a1a2e;color:#eee;text-align:center;padding:100px}}
+h1{{color:#e94560}}input{{background:#16213e;color:#eee;border:1px solid #333;padding:12px;font-size:16px;border-radius:4px;width:300px}}
+button{{background:#e94560;color:#fff;border:none;padding:12px 24px;font-size:16px;border-radius:4px;cursor:pointer;margin-top:12px}}
+a{{color:#e94560}}
+</style></head>
+<body>
+<h1>🔒 Password Required</h1>
+{error_msg}
+<form onsubmit="location.href='/{paste_id}?password='+encodeURIComponent(document.getElementById('pw').value);return false;">
+<input id="pw" type="password" placeholder="Enter password..." autofocus>
+<br><button type="submit">🔓 Unlock</button>
+</form>
+<br><a href="/">← Go home</a>
 </body></html>"""
     
     def _render_404(self):
@@ -463,8 +590,8 @@ def _cleanup_loop(store_instance: PasteStore):
 
 def main():
     parser = argparse.ArgumentParser(description="PasteHut - Minimal Pastebin")
-    parser.add_argument("--port", type=int, default=9292)
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=PasteHutConfig.DEFAULT_PORT)
+    parser.add_argument("--host", default=PasteHutConfig.DEFAULT_HOST)
     parser.add_argument("--data-dir", default=DATA_DIR)
     args = parser.parse_args()
     

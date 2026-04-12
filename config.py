@@ -100,5 +100,4 @@ class InfraConfig:
 
 
 # 项目根目录（从本文件位置推算）
-import os
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
