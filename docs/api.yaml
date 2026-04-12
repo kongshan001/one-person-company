@@ -1,0 +1,558 @@
+openapi: 3.0.3
+info:
+  title: OnePersonCo API
+  description: |
+    Complete API documentation for OnePersonCo services:
+    - **PasteHut** — Paste/code sharing service
+    - **PingBot** — Uptime monitoring service
+  version: 1.0.0
+  contact:
+    name: OnePersonCo
+    url: https://github.com/kongshan001/one-person-company
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: PasteHut (local)
+  - url: http://localhost:8081
+    description: PingBot (local)
+
+tags:
+  - name: PasteHut - Pastes
+    description: CRUD operations for paste resources
+  - name: PasteHut - Web
+    description: Web UI and static pages
+  - name: PingBot - Targets
+    description: Monitor target management
+  - name: PingBot - Status
+    description: Uptime status and history
+
+# ══════════════════════════════════════
+# PATHS
+# ══════════════════════════════════════
+paths:
+  # ── PasteHut ──
+  /api/pastes:
+    post:
+      tags: [PasteHut - Pastes]
+      summary: Create a new paste
+      description: |
+        Creates a new paste with the given content. Returns the paste ID,
+        delete key, and metadata. Content size is limited to 512KB.
+      operationId: createPaste
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  description: Paste content (max 512KB)
+                  maxLength: 524288
+                title:
+                  type: string
+                  description: Optional title (auto-generated if empty)
+                syntax:
+                  type: string
+                  description: Syntax highlighting language
+                  default: text
+                  enum: [text, python, javascript, html, css, json, xml, sql, bash, go, rust, java, cpp, c, ruby, php, typescript, yaml, markdown, dockerfile, ini, diff]
+                expiry_hours:
+                  type: integer
+                  description: Hours until auto-deletion
+                  default: 168
+                  minimum: 1
+                  maximum: 8760
+      responses:
+        "200":
+          description: Paste created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasteCreated"
+              example:
+                id: "a1b2c3d4"
+                title: "My Code Snippet"
+                syntax: "python"
+                size: 256
+                created_at: "2026-04-13T00:00:00+00:00"
+                expires_at: "2026-04-20T00:00:00+00:00"
+                delete_key: "abc123XYZ_def456"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "内容超过限制 (512KB)"
+        "429":
+          description: Rate limit exceeded
+
+    get:
+      tags: [PasteHut - Pastes]
+      summary: List recent pastes
+      description: Returns a list of recent public pastes (metadata only, no content).
+      operationId: listPastes
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: List of recent pastes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PasteMeta"
+
+  /api/pastes/{paste_id}:
+    get:
+      tags: [PasteHut - Pastes]
+      summary: Get a paste
+      description: Retrieves paste content and metadata. Increments view counter.
+      operationId: getPaste
+      parameters:
+        - $ref: "#/components/parameters/PasteId"
+      responses:
+        "200":
+          description: Paste content and metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasteDetail"
+        "404":
+          description: Paste not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [PasteHut - Pastes]
+      summary: Delete a paste
+      description: Deletes a paste using its delete key for authentication.
+      operationId: deletePaste
+      parameters:
+        - $ref: "#/components/parameters/PasteId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [delete_key]
+              properties:
+                delete_key:
+                  type: string
+                  description: The delete key returned when the paste was created
+      responses:
+        "200":
+          description: Paste deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: string
+                    example: "a1b2c3d4"
+        "403":
+          description: Invalid delete key
+        "404":
+          description: Paste not found
+
+  /api/pastes/{paste_id}/raw:
+    get:
+      tags: [PasteHut - Pastes]
+      summary: Get raw paste content
+      description: Returns paste content as plain text (no metadata).
+      operationId: getRawPaste
+      parameters:
+        - $ref: "#/components/parameters/PasteId"
+      responses:
+        "200":
+          description: Raw paste content
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Paste not found
+
+  /:
+    get:
+      tags: [PasteHut - Web]
+      summary: PasteHut home page
+      description: Returns the HTML home page with paste creation form.
+      operationId: pastehutHome
+      responses:
+        "200":
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /{paste_id}:
+    get:
+      tags: [PasteHut - Web]
+      summary: View paste in browser
+      description: Renders paste with syntax highlighting in HTML.
+      operationId: viewPasteHtml
+      parameters:
+        - $ref: "#/components/parameters/PasteId"
+      responses:
+        "200":
+          description: Highlighted paste HTML
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          description: Paste not found
+
+  # ── PingBot ──
+  /api/targets:
+    post:
+      tags: [PingBot - Targets]
+      summary: Add a monitoring target
+      description: |
+        Registers a new URL for uptime monitoring. The name must be alphanumeric
+        with hyphens/underscores. The URL must use http or https protocol.
+      operationId: addTarget
+      servers:
+        - url: http://localhost:8081
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url]
+              properties:
+                name:
+                  type: string
+                  pattern: "^[a-zA-Z0-9_-]+$"
+                  description: Unique target identifier
+                  example: "my-api"
+                url:
+                  type: string
+                  format: uri
+                  description: URL to monitor (http/https only)
+                  example: "https://api.example.com/health"
+                method:
+                  type: string
+                  default: GET
+                  enum: [GET, HEAD, POST]
+                expected_status:
+                  type: integer
+                  default: 200
+                  description: Expected HTTP status code
+                expected_keyword:
+                  type: string
+                  description: Optional keyword to check in response body
+                interval_seconds:
+                  type: integer
+                  default: 60
+                  minimum: 10
+                  maximum: 3600
+      responses:
+        "200":
+          description: Target added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "400":
+          description: Invalid input (bad name, URL, or duplicate)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    get:
+      tags: [PingBot - Targets]
+      summary: List all targets
+      operationId: listTargets
+      servers:
+        - url: http://localhost:8081
+      responses:
+        "200":
+          description: List of monitoring targets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Target"
+
+  /api/targets/{name}:
+    delete:
+      tags: [PingBot - Targets]
+      summary: Remove a monitoring target
+      operationId: removeTarget
+      servers:
+        - url: http://localhost:8081
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Target name
+      responses:
+        "200":
+          description: Target removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed:
+                    type: string
+        "404":
+          description: Target not found
+
+  /api/status:
+    get:
+      tags: [PingBot - Status]
+      summary: Get all targets status
+      description: Returns current status overview including uptime percentages and response times.
+      operationId: getStatus
+      servers:
+        - url: http://localhost:8081
+      responses:
+        "200":
+          description: Status overview for all targets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TargetStatus"
+
+  /api/history/{name}:
+    get:
+      tags: [PingBot - Status]
+      summary: Get check history for a target
+      operationId: getHistory
+      servers:
+        - url: http://localhost:8081
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: hours
+          in: query
+          schema:
+            type: integer
+            default: 24
+      responses:
+        "200":
+          description: Check history records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CheckRecord"
+
+  /api/check/{name}:
+    post:
+      tags: [PingBot - Status]
+      summary: Trigger an immediate check
+      description: Runs a check on the specified target immediately and records the result.
+      operationId: checkNow
+      servers:
+        - url: http://localhost:8081
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Check result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckResult"
+        "404":
+          description: Target not found
+
+# ══════════════════════════════════════
+# COMPONENTS
+# ══════════════════════════════════════
+components:
+  parameters:
+    PasteId:
+      name: paste_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-f0-9]{8}$"
+      description: 8-character hex paste ID
+
+  schemas:
+    # ── PasteHut ──
+    PasteCreated:
+      type: object
+      properties:
+        id:
+          type: string
+          description: 8-character unique ID
+        title:
+          type: string
+        syntax:
+          type: string
+        size:
+          type: integer
+          description: Content size in bytes
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        delete_key:
+          type: string
+          description: Key for deleting this paste (shown only once)
+
+    PasteMeta:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        syntax:
+          type: string
+        size:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        views:
+          type: integer
+
+    PasteDetail:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        syntax:
+          type: string
+        content:
+          type: string
+        size:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        views:
+          type: integer
+
+    # ── PingBot ──
+    Target:
+      type: object
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+        method:
+          type: string
+        expected_status:
+          type: integer
+        expected_keyword:
+          type: string
+          nullable: true
+        interval_seconds:
+          type: integer
+
+    TargetStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+        is_up:
+          type: boolean
+        uptime_24h:
+          type: number
+          description: Uptime percentage over last 24 hours
+        avg_response_ms:
+          type: number
+          description: Average response time in milliseconds
+        last_check:
+          type: string
+          format: date-time
+          nullable: true
+        last_error:
+          type: string
+          nullable: true
+
+    CheckRecord:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        is_up:
+          type: boolean
+        status_code:
+          type: integer
+          nullable: true
+        response_time_ms:
+          type: number
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
+    CheckResult:
+      type: object
+      properties:
+        is_up:
+          type: boolean
+        status_code:
+          type: integer
+          nullable: true
+        response_time_ms:
+          type: number
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
+    # ── Shared ──
+    Error:
+      type: object
+      properties:
+        error:
+          type: string

@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OnePersonCo — Solo Founder SaaS Stack</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #0f0f1a;
+            --bg2: #1a1a2e;
+            --accent: #e94560;
+            --accent2: #0f3460;
+            --text: #eaeaea;
+            --text-dim: #888;
+            --card: #16213e;
+            --glow: rgba(233, 69, 96, 0.15);
+        }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        /* ── Hero ── */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 2rem;
+            background: radial-gradient(ellipse at 50% 0%, var(--glow) 0%, transparent 60%),
+                        var(--bg);
+        }
+        .hero h1 {
+            font-size: clamp(2.5rem, 6vw, 4.5rem);
+            font-weight: 800;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #e94560, #f5a623, #e94560);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .hero p {
+            font-size: clamp(1rem, 2vw, 1.4rem);
+            color: var(--text-dim);
+            max-width: 600px;
+            margin-bottom: 2rem;
+        }
+        .hero-badges {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.4rem 1rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            border: 1px solid rgba(233, 69, 96, 0.3);
+            background: rgba(233, 69, 96, 0.08);
+        }
+
+        /* ── Products ── */
+        .products {
+            padding: 5rem 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .section-title {
+            text-align: center;
+            font-size: 2.2rem;
+            margin-bottom: 0.5rem;
+        }
+        .section-sub {
+            text-align: center;
+            color: var(--text-dim);
+            margin-bottom: 3rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 2rem;
+        }
+        .card {
+            background: var(--card);
+            border-radius: 16px;
+            padding: 2.5rem;
+            border: 1px solid rgba(255,255,255,0.06);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+        }
+        .card-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        .card h3 {
+            font-size: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+        .card p {
+            color: var(--text-dim);
+            margin-bottom: 1.5rem;
+        }
+        .tag-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .tag {
+            font-size: 0.75rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
+            background: var(--accent2);
+            color: #8ecae6;
+        }
+
+        /* ── Architecture ── */
+        .architecture {
+            padding: 5rem 2rem;
+            background: var(--bg2);
+        }
+        .arch-content {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .arch-diagram {
+            background: var(--card);
+            border-radius: 16px;
+            padding: 2rem;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            overflow-x: auto;
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+        .arch-diagram .hl { color: #e94560; }
+        .arch-diagram .dim { color: #555; }
+        .arch-diagram .green { color: #4ec9b0; }
+        .arch-diagram .blue { color: #569cd6; }
+
+        /* ── Features ── */
+        .features {
+            padding: 5rem 2rem;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+        .feature-item {
+            padding: 1.5rem;
+            background: var(--card);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.04);
+        }
+        .feature-item .fi-icon {
+            font-size: 1.8rem;
+            margin-bottom: 0.5rem;
+        }
+        .feature-item h4 {
+            margin-bottom: 0.4rem;
+        }
+        .feature-item p {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+
+        /* ── Footer ── */
+        footer {
+            text-align: center;
+            padding: 3rem 2rem;
+            border-top: 1px solid rgba(255,255,255,0.06);
+        }
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+        footer a:hover { text-decoration: underline; }
+
+        /* ── Responsive ── */
+        @media (max-width: 600px) {
+            .hero h1 { font-size: 2rem; }
+            .card { padding: 1.5rem; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ════════ Hero ════════ -->
+<section class="hero">
+    <h1>OnePersonCo</h1>
+    <p>A complete solo-founder SaaS stack — icon generator, paste sharing, and uptime monitoring — all pure Python, zero dependencies.</p>
+    <div class="hero-badges">
+        <span class="badge">🐍 Python 3.8+</span>
+        <span class="badge">📦 Zero Dependencies</span>
+        <span class="badge">🐳 Docker Ready</span>
+        <span class="badge">✅ 50+ Unit Tests</span>
+    </div>
+</section>
+
+<!-- ════════ Products ════════ -->
+<section class="products">
+    <h2 class="section-title">Products</h2>
+    <p class="section-sub">Three production-ready micro-services in a single repo</p>
+    <div class="grid">
+        <div class="card">
+            <div class="card-icon">🎨</div>
+            <h3>IconForge</h3>
+            <p>AI-powered game asset generator. Create pixel art, sprites, and icons from text descriptions with quality validation and batch processing.</p>
+            <div class="tag-list">
+                <span class="tag">AI Generation</span>
+                <span class="tag">PNG / SVG</span>
+                <span class="tag">Quality Check</span>
+                <span class="tag">Batch Mode</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-icon">📋</div>
+            <h3>PasteHut</h3>
+            <p>Lightweight paste/code sharing service with syntax highlighting, rate limiting, auto-expiry, and a beautiful web UI. Drop-in Pastebin alternative.</p>
+            <div class="tag-list">
+                <span class="tag">HTTP API</span>
+                <span class="tag">Syntax Highlight</span>
+                <span class="tag">Auto-Expiry</span>
+                <span class="tag">Rate Limit</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-icon">🤖</div>
+            <h3>PingBot</h3>
+            <p>Uptime monitoring with SQLite persistence, keyword checking, response time tracking, and a real-time dashboard. Self-hosted monitoring made simple.</p>
+            <div class="tag-list">
+                <span class="tag">Uptime Monitor</span>
+                <span class="tag">SQLite</span>
+                <span class="tag">Dashboard</span>
+                <span class="tag">Alerts</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ════════ Architecture ════════ -->
+<section class="architecture">
+    <div class="arch-content">
+        <h2 class="section-title">Architecture</h2>
+        <p class="section-sub">Clean, maintainable, and self-documenting</p>
+        <pre class="arch-diagram">
+<span class="dim">┌──────────────────────────────────────────────────────┐</span>
+<span class="dim">│</span>                   <span class="hl">OnePersonCo</span>                     <span class="dim">│</span>
+<span class="dim">├──────────────┬──────────────┬────────────────────────┤</span>
+<span class="dim">│</span>  <span class="green">IconForge</span>   │  <span class="green">PasteHut</span>     │      <span class="green">PingBot</span>          <span class="dim">│</span>
+<span class="dim">│</span>  :8082       │  :8080       │      :8081             <span class="dim">│</span>
+<span class="dim">├──────────────┴──────────────┴────────────────────────┤</span>
+<span class="dim">│</span>              <span class="blue">Infrastructure Layer</span>                    <span class="dim">│</span>
+<span class="dim">│</span>  🔍 health_check  💾 backup_db  🧹 clean_logs    <span class="dim">│</span>
+<span class="dim">│</span>  🚀 deploy        📊 monthly_report               <span class="dim">│</span>
+<span class="dim">├─────────────────────────────────────────────────────┤</span>
+<span class="dim">│</span>  🐳 Docker  •  ⚙️ GitHub CI/CD  •  🧪 50+ Tests  <span class="dim">│</span>
+<span class="dim">└─────────────────────────────────────────────────────┘</span>
+        </pre>
+    </div>
+</section>
+
+<!-- ════════ Features ════════ -->
+<section class="features">
+    <h2 class="section-title">Why OnePersonCo?</h2>
+    <p class="section-sub">Built for solo founders who value simplicity and control</p>
+    <div class="feature-grid">
+        <div class="feature-item">
+            <div class="fi-icon">🚫</div>
+            <h4>Zero Dependencies</h4>
+            <p>Pure Python standard library. No pip install, no virtualenv, no supply chain risk.</p>
+        </div>
+        <div class="feature-item">
+            <div class="fi-icon">🐳</div>
+            <h4>Docker Ready</h4>
+            <p>Multi-service compose stack with health checks, volumes, and auto-restart policies.</p>
+        </div>
+        <div class="feature-item">
+            <div class="fi-icon">⚡</div>
+            <h4>CI/CD Pipeline</h4>
+            <p>GitHub Actions: lint, test on Python 3.8–3.12, Docker build verification, and security scan.</p>
+        </div>
+        <div class="feature-item">
+            <div class="fi-icon">🧪</div>
+            <h4>50+ Unit Tests</h4>
+            <p>Comprehensive unittest suite covering all core modules with isolated temp directories.</p>
+        </div>
+        <div class="feature-item">
+            <div class="fi-icon">📖</div>
+            <h4>OpenAPI Docs</h4>
+            <p>Full Swagger-style API documentation for PasteHut and PingBot HTTP endpoints.</p>
+        </div>
+        <div class="feature-item">
+            <div class="fi-icon">🔒</div>
+            <h4>Security First</h4>
+            <p>Rate limiting, delete keys, input validation, and SHA256 checksums on backups.</p>
+        </div>
+        <div class="feature-item">
+            <div class="fi-icon">🌐</div>
+            <h4>Beautiful Web UI</h4>
+            <p>Dark-themed, responsive interfaces built into each service. No frontend build step.</p>
+        </div>
+        <div class="feature-item">
+            <div class="fi-icon">📊</div>
+            <h4>Monitoring Built-in</h4>
+            <p>System health checks, uptime dashboards, and SVG visualization included.</p>
+        </div>
+    </div>
+</section>
+
+<!-- ════════ Quick Start ════════ -->
+<section class="architecture">
+    <div class="arch-content">
+        <h2 class="section-title">Quick Start</h2>
+        <p class="section-sub">Up and running in 30 seconds</p>
+        <pre class="arch-diagram">
+<span class="hl"># Clone</span>
+git clone https://github.com/kongshan001/one-person-company.git
+cd one-person-company
+
+<span class="hl"># Run directly (Python 3.8+)</span>
+python3 products/paste-hut/server.py     <span class="dim"># → http://localhost:8080</span>
+python3 products/ping-bot/monitor.py     <span class="dim"># → http://localhost:8081</span>
+
+<span class="hl"># Or with Docker</span>
+docker compose up -d                     <span class="dim"># → All services</span>
+
+<span class="hl"># Run tests</span>
+python3 -m unittest discover -s tests -v <span class="dim"># → 50 tests</span>
+        </pre>
+    </div>
+</section>
+
+<!-- ════════ Footer ════════ -->
+<footer>
+    <p>OnePersonCo — Built with 💜 by a solo founder, for solo founders</p>
+    <p style="margin-top:0.5rem">
+        <a href="https://github.com/kongshan001/one-person-company">GitHub</a> ·
+        Pure Python · Zero Dependencies · MIT License
+    </p>
+</footer>
+
+</body>
+</html>

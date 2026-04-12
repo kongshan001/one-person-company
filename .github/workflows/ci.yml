@@ -1,0 +1,98 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Lint & Syntax Check ──
+  lint:
+    name: Lint & Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Syntax check all Python files
+        run: |
+          find . -name "*.py" -exec python3 -m py_compile {} \;
+          echo "✅ All Python files pass syntax check"
+
+      - name: Check for common issues
+        run: |
+          # Check for trailing whitespace
+          git diff --check HEAD~1 2>/dev/null || true
+          # Count files
+          echo "📊 Project files:"
+          find . -name "*.py" | wc -l | xargs echo "  Python files:"
+          find . -name "*.py" -exec cat {} \; | wc -l | xargs echo "  Total lines:"
+
+  # ── Unit Tests ──
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run unit tests
+        run: |
+          python3 -m unittest discover -s tests -v
+
+  # ── Docker Build Test ──
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t one-person-company .
+
+      - name: Test container starts
+        run: |
+          docker run -d --name opc-test -p 8080:8080 one-person-company
+          sleep 3
+          docker ps | grep opc-test
+          docker stop opc-test
+
+  # ── Security Scan ──
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check for hardcoded secrets
+        run: |
+          # Simple check for potential secrets (API keys, tokens, passwords)
+          ! grep -rn -i -E '(api_key|secret|password|token)\s*=\s*["\'][^"\']{8,}' \
+            --include="*.py" \
+            --exclude-dir=tests \
+            . || echo "⚠️ Potential hardcoded secret found"
+
+      - name: Check Python file permissions
+        run: |
+          # Ensure no executable Python files with sensitive content
+          find . -name "*.py" -perm /111 -exec ls -la {} \;

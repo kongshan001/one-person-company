@@ -1,0 +1,129 @@
+# ============================================
+# OnePersonCo - Docker Compose Stack
+# ============================================
+# Usage:
+#   docker compose up -d              # Start all services
+#   docker compose up pastehut         # Start PasteHut only
+#   docker compose logs -f pingbot     # Follow PingBot logs
+#   docker compose down                # Stop all
+
+version: "3.8"
+
+services:
+  # ── PasteHut: Paste Sharing Service ──
+  pastehut:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opc-pastehut
+    command: python3 /app/products/paste-hut/server.py
+    ports:
+      - "8080:8080"
+    volumes:
+      - pastehut-data:/data/pastehut
+    environment:
+      - PASTE_HUT_PORT=8080
+      - PASTE_HUT_DATA=/data/pastehut
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── PingBot: Uptime Monitor ──
+  pingbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opc-pingbot
+    command: python3 /app/products/ping-bot/monitor.py
+    ports:
+      - "8081:8081"
+    volumes:
+      - pingbot-data:/data/pingbot
+    environment:
+      - PINGBOT_PORT=8081
+      - PINGBOT_DATA=/data/pingbot
+    restart: unless-stopped
+    depends_on:
+      pastehut:
+        condition: service_healthy
+
+  # ── IconForge: Icon Generator ──
+  iconforge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opc-iconforge
+    command: python3 /app/products/icon-forge/generate.py
+    volumes:
+      - iconforge-data:/data/iconforge
+    environment:
+      - ICONFORGE_DATA=/data/iconforge
+    restart: "no"
+
+  # ── Infrastructure: Backup Cron ──
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opc-backup
+    command: >
+      sh -c "
+        while true; do
+          echo '[Backup] Running at $$(date)...';
+          python3 /app/infrastructure/cron/backup_db.py;
+          sleep 86400;
+        done
+      "
+    volumes:
+      - pastehut-data:/data/pastehut:ro
+      - pingbot-data:/data/pingbot:ro
+      - backup-data:/data/backups
+    restart: unless-stopped
+
+  # ── Infrastructure: Log Cleanup Cron ──
+  log-cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opc-log-cleanup
+    command: >
+      sh -c "
+        while true; do
+          echo '[LogClean] Running at $$(date)...';
+          python3 /app/infrastructure/cron/clean_logs.py;
+          sleep 3600;
+        done
+      "
+    volumes:
+      - log-data:/data/logs
+    restart: unless-stopped
+
+  # ── Infrastructure: Health Check ──
+  healthcheck:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opc-healthcheck
+    command: >
+      sh -c "
+        while true; do
+          python3 /app/infrastructure/monitoring/health_check.py
+            --url http://pastehut:8080/
+            --url http://pingbot:8081/;
+          sleep 60;
+        done
+      "
+    restart: unless-stopped
+    depends_on:
+      - pastehut
+      - pingbot
+
+volumes:
+  pastehut-data:
+  pingbot-data:
+  iconforge-data:
+  backup-data:
+  log-data:
