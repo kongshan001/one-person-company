@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""
+PingBot - 网站/API 可用性监控
+零依赖，纯 Python 标准库
+
+用法:
+  python monitor.py [--port 8081] [--host 0.0.0.0]
+
+API:
+  POST /api/check          - 立即检查一个URL
+  GET  /api/status         - 所有目标状态
+  GET  /api/history/{name} - 某个目标的历史
+  POST /api/targets        - 添加监控目标
+  DELETE /api/targets/{name} - 删除监控目标
+  GET  /health             - 健康检查
+"""
+
+import argparse
+import json
+import os
+import sqlite3
+import time
+import urllib.request
+import urllib.error
+import urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime
+from pathlib import Path
+from threading import Thread
+import threading
+
+
+# ============ 配置 ============
+
+DB_PATH = os.path.expanduser("~/.pingbot/pingbot.db")
+CHECK_INTERVAL = 60  # 秒
+REQUEST_TIMEOUT = 10  # 秒
+MAX_HISTORY_DAYS = 30
+
+
+# ============ 数据库 ============
+
+class PingDB:
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.Lock()
+        self._init_tables()
+    
+    def _init_tables(self):
+        with self.lock:
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS targets (
+                    name TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    method TEXT DEFAULT 'GET',
+                    expected_status INTEGER DEFAULT 200,
+                    expected_keyword TEXT,
+                    interval INTEGER DEFAULT 60,
+                    enabled INTEGER DEFAULT 1,
+                    created_at TEXT DEFAULT (datetime('now'))
+                );
+                CREATE TABLE IF NOT EXISTS checks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_name TEXT NOT NULL,
+                    status_code INTEGER,
+                    response_time_ms INTEGER,
+                    is_up INTEGER,
+                    error TEXT,
+                    checked_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (target_name) REFERENCES targets(name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_checks_target ON checks(target_name);
+                CREATE INDEX IF NOT EXISTS idx_checks_time ON checks(checked_at);
+            """)
+            self.conn.commit()
+    
+    def add_target(self, name: str, url: str, method: str = "GET",
+                   expected_status: int = 200, expected_keyword: str = None,
+                   interval: int = 60) -> dict:
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO targets (name, url, method, expected_status, expected_keyword, interval) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, url, method, expected_status, expected_keyword, interval)
+            )
+            self.conn.commit()
+        return {"name": name, "url": url, "method": method}
+    
+    def remove_target(self, name: str) -> bool:
+        with self.lock:
+            cursor = self.conn.execute("DELETE FROM targets WHERE name = ?", (name,))
+            self.conn.commit()
+            return cursor.rowcount > 0
+    
+    def get_targets(self, enabled_only: bool = False) -> list:
+        query = "SELECT * FROM targets"
+        if enabled_only:
+            query += " WHERE enabled = 1"
+        with self.lock:
+            rows = self.conn.execute(query).fetchall()
+        return [dict(r) for r in rows]
+    
+    def record_check(self, target_name: str, status_code: int = None,
+                     response_time_ms: int = None, is_up: bool = False,
+                     error: str = None):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO checks (target_name, status_code, response_time_ms, is_up, error) VALUES (?, ?, ?, ?, ?)",
+                (target_name, status_code, response_time_ms, int(is_up), error)
+            )
+            self.conn.commit()
+    
+    def get_history(self, target_name: str, hours: int = 24) -> list:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM checks WHERE target_name = ? AND checked_at > datetime('now', ?) ORDER BY checked_at DESC LIMIT 500",
+                (target_name, f"-{hours} hours")
+            ).fetchall()
+        return [dict(r) for r in rows]
+    
+    def get_status(self) -> list:
+        targets = self.get_targets(enabled_only=True)
+        result = []
+        for t in targets:
+            with self.lock:
+                last = self.conn.execute(
+                    "SELECT * FROM checks WHERE target_name = ? ORDER BY checked_at DESC LIMIT 1",
+                    (t["name"],)
+                ).fetchone()
+            
+            # 计算可用率 (最近24小时)
+            with self.lock:
+                stats = self.conn.execute(
+                    "SELECT COUNT(*) as total, SUM(is_up) as up_count FROM checks WHERE target_name = ? AND checked_at > datetime('now', '-24 hours')",
+                    (t["name"],)
+                ).fetchone()
+            
+            uptime_pct = (stats["up_count"] / stats["total"] * 100) if stats["total"] else 0
+            
+            result.append({
+                **t,
+                "last_check": dict(last) if last else None,
+                "uptime_24h": round(uptime_pct, 2),
+                "total_checks_24h": stats["total"],
+            })
+        return result
+    
+    def cleanup_old(self):
+        """清理旧记录"""
+        with self.lock:
+            self.conn.execute(
+                f"DELETE FROM checks WHERE checked_at < datetime('now', '-{MAX_HISTORY_DAYS} days')"
+            )
+            self.conn.commit()
+
+
+# ============ 检查器 ============
+
+class Pinger:
+    def __init__(self, db: PingDB):
+        self.db = db
+        self.running = False
+    
+    def check_url(self, url: str, method: str = "GET",
+                  expected_status: int = 200,
+                  expected_keyword: str = None) -> dict:
+        """检查单个URL"""
+        start = time.time()
+        try:
+            req = urllib.request.Request(url, method=method)
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                status_code = resp.status
+                body = resp.read().decode("utf-8", errors="ignore")
+                response_time = int((time.time() - start) * 1000)
+                
+                is_up = (status_code == expected_status)
+                if expected_keyword and expected_keyword not in body:
+                    is_up = False
+                
+                return {
+                    "status_code": status_code,
+                    "response_time_ms": response_time,
+                    "is_up": is_up,
+                    "error": None,
+                }
+        except urllib.error.HTTPError as e:
+            response_time = int((time.time() - start) * 1000)
+            return {
+                "status_code": e.code,
+                "response_time_ms": response_time,
+                "is_up": e.code == expected_status,
+                "error": str(e),
+            }
+        except Exception as e:
+            response_time = int((time.time() - start) * 1000)
+            return {
+                "status_code": None,
+                "response_time_ms": response_time,
+                "is_up": False,
+                "error": str(e),
+            }
+    
+    def check_all(self):
+        """检查所有启用的目标"""
+        targets = self.db.get_targets(enabled_only=True)
+        for t in targets:
+            result = self.check_url(
+                t["url"], t["method"], t["expected_status"], t["expected_keyword"]
+            )
+            self.db.record_check(t["name"], **result)
+    
+    def start_loop(self):
+        """后台循环检查"""
+        self.running = True
+        while self.running:
+            try:
+                self.check_all()
+            except Exception as e:
+                print(f"[PingBot] check_all error: {e}")
+            time.sleep(CHECK_INTERVAL)
+
+
+# ============ HTTP 服务 ============
+
+db = None
+pinger = None
+
+
+class PingHandler(BaseHTTPRequestHandler):
+    
+    def _send_json(self, data, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+    
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            return json.loads(self.rfile.read(length).decode())
+        return {}
+    
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        
+        if path == "/health":
+            self._send_json({"status": "ok", "targets": len(db.get_targets())})
+        elif path == "/api/status":
+            self._send_json({"targets": db.get_status()})
+        elif path.startswith("/api/history/"):
+            name = path[14:]
+            history = db.get_history(name)
+            self._send_json({"target": name, "checks": history})
+        elif path == "/":
+            self._send_dashboard()
+        else:
+            self._send_json({"error": "Not found"}, 404)
+    
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path
+        
+        if path == "/api/check":
+            data = self._read_body()
+            result = pinger.check_url(
+                data.get("url"),
+                data.get("method", "GET"),
+                data.get("expected_status", 200),
+                data.get("expected_keyword"),
+            )
+            self._send_json(result)
+        elif path == "/api/targets":
+            data = self._read_body()
+            required = ["name", "url"]
+            if not all(data.get(k) for k in required):
+                self._send_json({"error": "name and url required"}, 400)
+                return
+            result = db.add_target(
+                data["name"], data["url"],
+                data.get("method", "GET"),
+                data.get("expected_status", 200),
+                data.get("expected_keyword"),
+                data.get("interval", 60),
+            )
+            self._send_json(result, 201)
+        else:
+            self._send_json({"error": "Not found"}, 404)
+    
+    def do_DELETE(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/api/targets/"):
+            name = path[14:]
+            if db.remove_target(name):
+                self._send_json({"deleted": name})
+            else:
+                self._send_json({"error": "Not found"}, 404)
+    
+    def _send_dashboard(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        # 简洁监控面板
+        html = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>PingBot</title>
+<style>
+body{font-family:system-ui;background:#1a1a2e;color:#eee;max-width:900px;margin:40px auto;padding:20px}
+h1{color:#e94560}.up{color:#2ecc71}.down{color:#e74c3c}
+.target{background:#16213e;padding:16px;margin:8px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center}
+.dot{width:12px;height:12px;border-radius:50%;display:inline-block;margin-right:8px}
+.dot.up{background:#2ecc71}.dot.down{background:#e74c3c}
+form{background:#16213e;padding:16px;border-radius:8px;margin-top:24px}
+input{background:#0f3460;color:#eee;border:1px solid #333;padding:8px;margin:4px;border-radius:4px}
+button{background:#e94560;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer}
+</style></head><body>
+<h1>🤖 PingBot</h1><div id="targets">Loading...</div>
+<form id="f">
+<h3>+ Add Target</h3>
+<input id="n" placeholder="Name" required><input id="u" placeholder="URL" required>
+<input id="s" placeholder="Expected Status" value="200" type="number">
+<button type="submit">Add</button>
+</form>
+<script>
+const load=()=>fetch('/api/status').then(r=>r.json()).then(d=>{
+document.getElementById('targets').innerHTML=d.targets.map(t=>{
+const last=t.last_check;const up=last?last.is_up:null;
+return '<div class="target"><div><span class="dot '+(up?'up':'down')+'"></span><strong>'+t.name+'</strong> <small>'+t.url+'</small></div><div>'+(last?'<span class="'+(up?'up':'down')+'">'+(up?'UP':'DOWN')+'</span> '+last.response_time_ms+'ms':'—')+' | Uptime: '+t.uptime_24h+'%</div></div>';
+}).join('')||'<p>No targets yet</p>';
+});
+document.getElementById('f').onsubmit=async e=>{e.preventDefault();const d={name:document.getElementById('n').value,url:document.getElementById('u').value,expected_status:parseInt(document.getElementById('s').value)};await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});load()};
+load();setInterval(load,30000);
+</script></body></html>"""
+        self.wfile.write(html.encode())
+    
+    def log_message(self, format, *args):
+        print(f"[PingBot] {args[0]}")
+
+
+# ============ 入口 ============
+
+def main():
+    parser = argparse.ArgumentParser(description="PingBot - Uptime Monitor")
+    parser.add_argument("--port", type=int, default=8081)
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--db", default=DB_PATH)
+    args = parser.parse_args()
+    
+    global db, pinger
+    db = PingDB(args.db)
+    pinger = Pinger(db)
+    
+    # 启动后台检查线程
+    checker_thread = Thread(target=pinger.start_loop, daemon=True)
+    checker_thread.start()
+    
+    server = HTTPServer((args.host, args.port), PingHandler)
+    print(f"🤖 PingBot running on http://{args.host}:{args.port}")
+    
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pinger.running = False
+        print("\n👋 PingBot stopped")
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
