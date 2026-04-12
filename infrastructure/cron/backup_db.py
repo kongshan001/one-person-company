@@ -7,8 +7,10 @@
 """
 
 import argparse
+import hashlib
 import os
 import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -16,8 +18,20 @@ DEFAULT_BACKUP_DIR = os.path.expanduser("~/.onepersonco/backups")
 RETENTION_DAYS = 30
 
 
+def _sha256_file(filepath: str) -> str:
+    """计算文件的 SHA256 哈希"""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def backup_file(src: str, backup_dir: str, prefix: str = "") -> str:
-    """备份单个文件"""
+    """备份单个文件，并生成 SHA256 校验文件"""
     os.makedirs(backup_dir, exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -25,8 +39,24 @@ def backup_file(src: str, backup_dir: str, prefix: str = "") -> str:
     name, ext = os.path.splitext(basename)
     dest = os.path.join(backup_dir, f"{prefix}{name}_{timestamp}{ext}")
     
-    shutil.copy2(src, dest)
+    if ext.lower() in (".db", ".sqlite", ".sqlite3"):
+        # SQLite hot-backup using backup API
+        src_conn = sqlite3.connect(src)
+        dst_conn = sqlite3.connect(dest)
+        src_conn.backup(dst_conn)
+        dst_conn.close()
+        src_conn.close()
+    else:
+        shutil.copy2(src, dest)
+    
+    # SHA256 完整性校验
+    sha256 = _sha256_file(dest)
+    checksum_file = dest + ".sha256"
+    with open(checksum_file, "w") as f:
+        f.write(f"{sha256}  {os.path.basename(dest)}\n")
+    
     print(f"  ✅ Backed up: {src} → {dest}")
+    print(f"  🔒 SHA256: {sha256}")
     return dest
 
 

@@ -9,7 +9,7 @@ description: 自动部署、监控告警、故障自愈
 ### 服务列表
 | 服务 | 端口 | 健康检查 | 告警阈值 |
 |------|------|----------|----------|
-| IconForge API | 8080 | /health | 5xx > 3/min |
+| IconForge | CLI tool, no HTTP service | N/A | N/A |
 | PasteHut | 9292 | /health | 5xx > 3/min |
 | PingBot | 8081 | /health | 5xx > 3/min |
 | 主站 | 80 | / | 响应 > 3s |

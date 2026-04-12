@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+output/
+*.db
+.env
+*.log
+*.zip
+.DS_Store
+node_modules/

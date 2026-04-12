@@ -127,7 +127,6 @@ def run_checks() -> dict:
     # 服务检查
     services = [
         ("PasteHut", "http://localhost:9292/health"),
-        ("Monitor", "http://localhost:9191/health"),
         ("PingBot", "http://localhost:8081/health"),
     ]
     for name, url in services:

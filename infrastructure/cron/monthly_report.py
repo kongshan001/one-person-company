@@ -30,8 +30,24 @@ def generate_report(month: str, output_dir: str) -> dict:
         try:
             conn = sqlite3.connect(pingbot_db)
             conn.row_factory = sqlite3.Row
-            total_checks = conn.execute("SELECT COUNT(*) as c FROM checks").fetchone()["c"]
-            up_checks = conn.execute("SELECT COUNT(*) as c FROM checks WHERE is_up = 1").fetchone()["c"]
+            # Calculate month boundaries for filtering
+            month_start = f"{month}-01"
+            # Next month start
+            year, m = month.split("-")
+            m_int = int(m)
+            y_int = int(year)
+            if m_int == 12:
+                next_month = f"{y_int + 1}-01-01"
+            else:
+                next_month = f"{y_int}-{m_int + 1:02d}-01"
+            total_checks = conn.execute(
+                "SELECT COUNT(*) as c FROM checks WHERE checked_at >= ? AND checked_at < ?",
+                (month_start, next_month)
+            ).fetchone()["c"]
+            up_checks = conn.execute(
+                "SELECT COUNT(*) as c FROM checks WHERE is_up = 1 AND checked_at >= ? AND checked_at < ?",
+                (month_start, next_month)
+            ).fetchone()["c"]
             uptime = round(up_checks / total_checks * 100, 2) if total_checks else 0
             
             report["infrastructure"]["uptime"] = {

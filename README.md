@@ -2,6 +2,41 @@
 
 > AI-Native Solo Company — 一个人 + AI Agent = 一家公司
 
+## Quick Start
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/kongshan001/one-person-company.git
+cd one-person-company
+
+# 2. 启动所有服务
+python infrastructure/deploy/deploy.py
+
+# 3. 查看服务状态
+python infrastructure/deploy/deploy.py --status
+
+# 4. 访问服务
+#    PasteHut:  http://localhost:9292
+#    PingBot:   http://localhost:8081
+
+# 5. 生成游戏图标
+python products/icon-forge/generate.py --prompt "dark fantasy sword" --style dark
+
+# 6. 停止所有服务
+python infrastructure/deploy/deploy.py --stop
+
+# 7. 单独启动/停止某个服务
+python infrastructure/deploy/deploy.py --service paste-hut
+python infrastructure/deploy/deploy.py --service paste-hut --stop
+```
+
+### 环境变量（可选）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `PINGBOT_API_KEY` | PingBot API 鉴权密钥 | 空（不鉴权） |
+| `PINGBOT_ALERT_WEBHOOK` | PingBot 告警 Webhook URL | 空（不告警） |
+
 ## 宣言
 
 一个人不是限制，是优势。没有会议，没有协调，没有政治。

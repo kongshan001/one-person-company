@@ -18,6 +18,7 @@ API:
 import argparse
 import json
 import os
+import re
 import sqlite3
 import time
 import urllib.request
@@ -36,6 +37,35 @@ DB_PATH = os.path.expanduser("~/.pingbot/pingbot.db")
 CHECK_INTERVAL = 60  # 秒
 REQUEST_TIMEOUT = 10  # 秒
 MAX_HISTORY_DAYS = 30
+MAX_BODY_READ = 65536  # 64KB, 只读取响应体前 64KB
+
+ALERT_WEBHOOK_URL = os.environ.get("PINGBOT_ALERT_WEBHOOK", "")
+
+
+# ============ 告警通知 ============
+
+def send_alert(target_name: str, url: str, error: str):
+    """POST JSON 告警到 webhook URL"""
+    if not ALERT_WEBHOOK_URL:
+        return
+    try:
+        payload = json.dumps({
+            "alert": "service_down",
+            "target": target_name,
+            "url": url,
+            "error": error,
+            "timestamp": datetime.utcnow().isoformat(),
+        }).encode()
+        req = urllib.request.Request(
+            ALERT_WEBHOOK_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except Exception as e:
+        print(f"[PingBot] Alert webhook failed: {e}")
 
 
 # ============ 数据库 ============
@@ -80,6 +110,12 @@ class PingDB:
     def add_target(self, name: str, url: str, method: str = "GET",
                    expected_status: int = 200, expected_keyword: str = None,
                    interval: int = 60) -> dict:
+        # Validate name: only [a-zA-Z0-9_-]
+        if not re.fullmatch(r'[a-zA-Z0-9_-]+', name):
+            return {"error": "name must contain only alphanumeric characters, underscores, and hyphens"}
+        # Validate url: must start with http:// or https://
+        if not url.startswith("http://") and not url.startswith("https://"):
+            return {"error": "url must start with http:// or https://"}
         with self.lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO targets (name, url, method, expected_status, expected_keyword, interval) VALUES (?, ?, ?, ?, ?, ?)",
@@ -148,10 +184,11 @@ class PingDB:
         return result
     
     def cleanup_old(self):
-        """清理旧记录"""
+        """清理旧记录（参数化查询）"""
         with self.lock:
             self.conn.execute(
-                f"DELETE FROM checks WHERE checked_at < datetime('now', '-{MAX_HISTORY_DAYS} days')"
+                "DELETE FROM checks WHERE checked_at < datetime('now', ? || ' days')",
+                (str(-MAX_HISTORY_DAYS),)
             )
             self.conn.commit()
 
@@ -166,13 +203,13 @@ class Pinger:
     def check_url(self, url: str, method: str = "GET",
                   expected_status: int = 200,
                   expected_keyword: str = None) -> dict:
-        """检查单个URL"""
+        """检查单个URL，只读取前 64KB 响应体"""
         start = time.time()
         try:
             req = urllib.request.Request(url, method=method)
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 status_code = resp.status
-                body = resp.read().decode("utf-8", errors="ignore")
+                body = resp.read(MAX_BODY_READ).decode("utf-8", errors="ignore")
                 response_time = int((time.time() - start) * 1000)
                 
                 is_up = (status_code == expected_status)
@@ -210,6 +247,9 @@ class Pinger:
                 t["url"], t["method"], t["expected_status"], t["expected_keyword"]
             )
             self.db.record_check(t["name"], **result)
+            # 服务 down 时发送告警
+            if not result["is_up"] and result.get("error"):
+                send_alert(t["name"], t["url"], result["error"])
     
     def start_loop(self):
         """后台循环检查"""
@@ -230,6 +270,17 @@ pinger = None
 
 class PingHandler(BaseHTTPRequestHandler):
     
+    API_KEY = os.environ.get("PINGBOT_API_KEY", "")
+    
+    def _check_auth(self) -> bool:
+        """Check API key for POST/DELETE. Skip if no key configured."""
+        if not self.API_KEY:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            return auth[7:] == self.API_KEY
+        return False
+    
     def _send_json(self, data, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -240,7 +291,11 @@ class PingHandler(BaseHTTPRequestHandler):
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0))
         if length:
-            return json.loads(self.rfile.read(length).decode())
+            raw = self.rfile.read(length).decode()
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None  # 无效 JSON
         return {}
     
     def do_GET(self):
@@ -262,10 +317,21 @@ class PingHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
         
+        if not self._check_auth():
+            self._send_json({"error": "Unauthorized"}, 401)
+            return
+        
         if path == "/api/check":
             data = self._read_body()
+            if data is None:
+                self._send_json({"error": "Invalid JSON body"}, 400)
+                return
+            url = data.get("url", "")
+            if not url.startswith("http://") and not url.startswith("https://"):
+                self._send_json({"error": "url must start with http:// or https://"}, 400)
+                return
             result = pinger.check_url(
-                data.get("url"),
+                url,
                 data.get("method", "GET"),
                 data.get("expected_status", 200),
                 data.get("expected_keyword"),
@@ -273,6 +339,9 @@ class PingHandler(BaseHTTPRequestHandler):
             self._send_json(result)
         elif path == "/api/targets":
             data = self._read_body()
+            if data is None:
+                self._send_json({"error": "Invalid JSON body"}, 400)
+                return
             required = ["name", "url"]
             if not all(data.get(k) for k in required):
                 self._send_json({"error": "name and url required"}, 400)
@@ -284,12 +353,20 @@ class PingHandler(BaseHTTPRequestHandler):
                 data.get("expected_keyword"),
                 data.get("interval", 60),
             )
-            self._send_json(result, 201)
+            if "error" in result:
+                self._send_json(result, 400)
+            else:
+                self._send_json(result, 201)
         else:
             self._send_json({"error": "Not found"}, 404)
     
     def do_DELETE(self):
         path = urllib.parse.urlparse(self.path).path
+        
+        if not self._check_auth():
+            self._send_json({"error": "Unauthorized"}, 401)
+            return
+        
         if path.startswith("/api/targets/"):
             name = path[14:]
             if db.remove_target(name):

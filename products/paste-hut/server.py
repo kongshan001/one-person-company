@@ -8,14 +8,19 @@ PasteHut - 极简 Pastebin 服务
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+import re
+import secrets
 import time
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Thread
+
 
 # ============ 配置 ============
 
@@ -25,6 +30,12 @@ DEFAULT_EXPIRY_HOURS = 24 * 7  # 7天
 MAX_EXPIRY_HOURS = 24 * 30  # 30天
 RATE_LIMIT_WINDOW = 60  # 秒
 RATE_LIMIT_MAX = 10  # 每分钟最多10条
+
+ALLOWED_SYNTAXES = {"text", "python", "javascript", "html", "css", "json", "sql", "bash"}
+
+# Views flush 配置
+VIEWS_FLUSH_INTERVAL = 10  # 每 10 次视图递增 flush 一次
+VIEWS_FLUSH_SECONDS = 30   # 或每 30 秒 flush 一次
 
 
 # ============ 存储 ============
@@ -36,6 +47,11 @@ class PasteStore:
         self.meta_file = self.data_dir / "meta.json"
         self.meta = self._load_meta()
         self.rate_limits = {}  # ip -> [timestamps]
+        # 延迟批量写入 views 相关
+        self._views_dirty = {}  # paste_id -> pending view count
+        self._views_total_dirty = 0
+        self._last_flush = time.time()
+        self._flush_lock = __import__('threading').Lock()
     
     def _load_meta(self) -> dict:
         if self.meta_file.exists():
@@ -46,7 +62,40 @@ class PasteStore:
         return {}
     
     def _save_meta(self):
-        self.meta_file.write_text(json.dumps(self.meta, indent=2, ensure_ascii=False))
+        """保存 meta 到磁盘（带文件锁）"""
+        self.meta_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = str(self.meta_file) + ".tmp"
+        with open(tmp_path, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                json.dump(self.meta, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        os.replace(tmp_path, str(self.meta_file))
+    
+    def _flush_views(self):
+        """将内存中的 views 增量写入 meta 并持久化"""
+        with self._flush_lock:
+            if not self._views_dirty:
+                return
+            for paste_id, delta in self._views_dirty.items():
+                if paste_id in self.meta:
+                    self.meta[paste_id]["views"] = self.meta[paste_id].get("views", 0) + delta
+            self._views_dirty.clear()
+            self._views_total_dirty = 0
+            self._last_flush = time.time()
+            self._save_meta()
+    
+    def _maybe_flush_views(self):
+        """检查是否需要 flush views"""
+        should_flush = (
+            self._views_total_dirty >= VIEWS_FLUSH_INTERVAL or
+            (time.time() - self._last_flush) >= VIEWS_FLUSH_SECONDS
+        )
+        if should_flush:
+            self._flush_views()
     
     def _generate_id(self, content: str) -> str:
         """生成短ID: 8位hash"""
@@ -75,11 +124,25 @@ class PasteStore:
         
         if expiry_hours is None:
             expiry_hours = DEFAULT_EXPIRY_HOURS
-        expiry_hours = min(expiry_hours, MAX_EXPIRY_HOURS)
+        
+        # 校验 expiry_hours
+        try:
+            expiry_hours = int(expiry_hours)
+        except (TypeError, ValueError):
+            return {"error": f"expiry_hours 必须为整数"}
+        if not (0 < expiry_hours <= MAX_EXPIRY_HOURS):
+            return {"error": f"expiry_hours 必须在 1~{MAX_EXPIRY_HOURS} 之间"}
+        
+        # 校验 syntax
+        if syntax not in ALLOWED_SYNTAXES:
+            return {"error": f"syntax 不合法，允许值: {', '.join(sorted(ALLOWED_SYNTAXES))}"}
         
         paste_id = self._generate_id(content + str(time.time()))
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expires_at = now + timedelta(hours=expiry_hours)
+        
+        # 生成 delete_key
+        delete_key = secrets.token_urlsafe(16)
         
         # 保存内容
         paste_file = self.data_dir / f"{paste_id}.txt"
@@ -95,13 +158,16 @@ class PasteStore:
             "expires_at": expires_at.isoformat(),
             "ip": ip,
             "views": 0,
+            "delete_key": delete_key,
         }
         self._save_meta()
         
-        return self.meta[paste_id]
+        result = dict(self.meta[paste_id])
+        result["delete_key"] = delete_key  # 创建时返回 delete_key
+        return result
     
     def get(self, paste_id: str) -> dict:
-        """获取 paste"""
+        """获取 paste（views 使用延迟批量写入）"""
         if paste_id not in self.meta:
             return None
         
@@ -109,7 +175,7 @@ class PasteStore:
         
         # 检查过期
         expires_at = datetime.fromisoformat(meta["expires_at"])
-        if datetime.utcnow() > expires_at:
+        if datetime.now(timezone.utc) > expires_at:
             self.delete(paste_id)
             return None
         
@@ -118,11 +184,21 @@ class PasteStore:
         if not paste_file.exists():
             return None
         
-        meta["views"] += 1
-        meta["content"] = paste_file.read_text()
-        self._save_meta()
+        # 延迟递增 views
+        with self._flush_lock:
+            self._views_dirty[paste_id] = self._views_dirty.get(paste_id, 0) + 1
+            self._views_total_dirty += 1
         
-        return meta
+        # 返回时包含当前总 views
+        current_views = meta.get("views", 0) + self._views_dirty.get(paste_id, 0)
+        
+        result = dict(meta)
+        result["content"] = paste_file.read_text()
+        result["views"] = current_views
+        
+        self._maybe_flush_views()
+        
+        return result
     
     def delete(self, paste_id: str) -> bool:
         """删除 paste"""
@@ -131,13 +207,26 @@ class PasteStore:
             if paste_file.exists():
                 paste_file.unlink()
             del self.meta[paste_id]
+            # 清除脏 views
+            with self._flush_lock:
+                self._views_dirty.pop(paste_id, None)
             self._save_meta()
             return True
         return False
     
+    def delete_with_key(self, paste_id: str, delete_key: str) -> dict:
+        """通过 delete_key 鉴权删除 paste"""
+        if paste_id not in self.meta:
+            return {"error": "Not found"}
+        meta = self.meta[paste_id]
+        if meta.get("delete_key") != delete_key:
+            return {"error": "Invalid delete_key"}
+        self.delete(paste_id)
+        return {"deleted": paste_id}
+    
     def cleanup_expired(self) -> int:
         """清理过期 paste"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired = []
         for pid, meta in self.meta.items():
             expires_at = datetime.fromisoformat(meta["expires_at"])
@@ -176,12 +265,14 @@ class PasteHandler(BaseHTTPRequestHandler):
     def _send_html(self, html, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(html.encode())
     
     def _send_text(self, text, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(text.encode())
     
@@ -198,6 +289,9 @@ class PasteHandler(BaseHTTPRequestHandler):
             self._send_json({"pastes": pastes})
         elif path.path.startswith("/raw/"):
             paste_id = path.path[5:]
+            if not re.fullmatch(r'[a-f0-9]+', paste_id):
+                self._send_json({"error": "Invalid paste ID"}, 400)
+                return
             paste = store.get(paste_id)
             if paste:
                 self._send_text(paste["content"])
@@ -253,6 +347,29 @@ class PasteHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(result, 201)
     
+    def do_DELETE(self):
+        path = urllib.parse.urlparse(self.path)
+        
+        # DELETE /api/paste/{id}
+        if path.path.startswith("/api/paste/"):
+            paste_id = path.path[len("/api/paste/"):]
+            # 从 query string 或 header 获取 delete_key
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            delete_key = params.get("delete_key", [None])[0]
+            if not delete_key:
+                delete_key = self.headers.get("X-Delete-Key", "")
+            if not delete_key:
+                self._send_json({"error": "delete_key required (query param or X-Delete-Key header)"}, 400)
+                return
+            result = store.delete_with_key(paste_id, delete_key)
+            if "error" in result:
+                self._send_json(result, 403 if "Invalid" in result.get("error", "") else 404)
+            else:
+                self._send_json(result)
+        else:
+            self._send_json({"error": "Not found"}, 404)
+    
     def _render_home(self):
         return """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>PasteHut</title>
@@ -279,7 +396,7 @@ document.getElementById('f').onsubmit=async(e)=>{
 e.preventDefault();
 const d={content:document.getElementById('c').value,title:document.getElementById('t').value,syntax:document.getElementById('s').value,expiry_hours:document.getElementById('e').value};
 const res=await fetch('/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
-const j=await res.json();if(j.id)location.href='/'+j.id;else alert(j.error||'Error');
+const j=await res.json();if(j.id){if(j.delete_key){console.log('Delete key:',j.delete_key);}location.href='/'+j.id;}else alert(j.error||'Error');
 };
 fetch('/api/list').then(r=>r.json()).then(d=>{
 const el=document.getElementById('r');
@@ -322,6 +439,22 @@ button{{background:#16213e;color:#eee;border:1px solid #333;padding:8px 16px;bor
         print(f"[PasteHut] {args[0]}")
 
 
+# ============ 过期清理线程 ============
+
+def _cleanup_loop(store_instance: PasteStore):
+    """后台线程：每 10 分钟清理过期 paste"""
+    while True:
+        try:
+            count = store_instance.cleanup_expired()
+            if count:
+                print(f"[PasteHut] Cleaned up {count} expired paste(s)")
+            # 同时 flush 残留 views
+            store_instance._flush_views()
+        except Exception as e:
+            print(f"[PasteHut] Cleanup error: {e}")
+        time.sleep(600)  # 10 分钟
+
+
 # ============ 入口 ============
 
 def main():
@@ -334,6 +467,10 @@ def main():
     global store
     store = PasteStore(args.data_dir)
     
+    # 启动过期清理后台线程
+    cleanup_thread = Thread(target=_cleanup_loop, args=(store,), daemon=True)
+    cleanup_thread.start()
+    
     server = HTTPServer((args.host, args.port), PasteHandler)
     print(f"📋 PasteHut running on http://{args.host}:{args.port}")
     print(f"   Data dir: {args.data_dir}")
@@ -341,6 +478,8 @@ def main():
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        # 退出前 flush 残留 views
+        store._flush_views()
         print("\n👋 PasteHut stopped")
         server.server_close()
 

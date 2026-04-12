@@ -13,6 +13,9 @@ import os
 import signal
 import subprocess
 import sys
+import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 # 项目根目录
@@ -37,6 +40,9 @@ SERVICES = {
 
 PID_DIR = Path("/tmp/onepersonco-pids")
 
+HEALTH_CHECK_TIMEOUT = 30  # 启动后健康检查等待秒数
+HEALTH_CHECK_INTERVAL = 2  # 每次检查间隔
+
 
 def get_pid(service_name: str) -> int:
     """获取服务的PID"""
@@ -60,6 +66,25 @@ def is_running(pid: int) -> bool:
         return False
 
 
+def _wait_for_health(name: str, port: int, timeout: int = HEALTH_CHECK_TIMEOUT):
+    """启动后健康检查等待"""
+    url = f"http://localhost:{port}/health"
+    print(f"  ⏳ Waiting for {name} health check...")
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status == 200:
+                    print(f"  ✅ {name} health check passed")
+                    return True
+        except (urllib.error.URLError, ConnectionRefusedError, OSError):
+            pass
+        time.sleep(HEALTH_CHECK_INTERVAL)
+    print(f"  ⚠️ {name} health check timed out after {timeout}s")
+    return False
+
+
 def start_service(name: str, config: dict):
     """启动单个服务"""
     pid = get_pid(name)
@@ -71,15 +96,24 @@ def start_service(name: str, config: dict):
     
     if config["type"] == "http":
         cmd = [sys.executable, config["script"], "--port", str(config["port"])]
+        # 修复：避免文件句柄泄漏，赋给变量并关闭
+        log_file = open(f"/tmp/{name}.log", "w")
         process = subprocess.Popen(
             cmd,
-            stdout=open(f"/tmp/{name}.log", "w"),
+            stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        # 注意：log_file 需要保持打开直到进程结束，但我们不在此处关闭
+        # 将其保存在进程对象上以便后续清理
+        process._log_file = log_file
+        
         pid_file = PID_DIR / f"{name}.pid"
         pid_file.write_text(str(process.pid))
         print(f"  🚀 {name} started (PID {process.pid}, port {config['port']})")
+        
+        # 启动后健康检查等待
+        _wait_for_health(name, config["port"])
     else:
         print(f"  ℹ️ {name} is a CLI tool, use directly: python {config['script']}")
 
@@ -93,7 +127,20 @@ def stop_service(name: str):
     
     if is_running(pid):
         os.kill(pid, signal.SIGTERM)
-        print(f"  🛑 {name} stopped (PID {pid})")
+        # 等待进程退出，否则 SIGKILL
+        for _ in range(10):  # 最多等 5 秒
+            if not is_running(pid):
+                break
+            time.sleep(0.5)
+        else:
+            # 进程未退出，发送 SIGKILL
+            try:
+                os.kill(pid, signal.SIGKILL)
+                print(f"  💀 {name} force killed (PID {pid})")
+            except ProcessLookupError:
+                pass
+        if not is_running(pid):
+            print(f"  🛑 {name} stopped (PID {pid})")
     else:
         print(f"  ⏹️ {name} not running (stale PID)")
     
@@ -130,6 +177,12 @@ def main():
     if args.status:
         show_status()
         return
+    
+    # 校验 --service 参数
+    if args.service and args.service not in SERVICES:
+        print(f"❌ Unknown service: {args.service}")
+        print(f"   Available services: {', '.join(SERVICES.keys())}")
+        sys.exit(1)
     
     targets = {args.service: SERVICES[args.service]} if args.service else SERVICES
     

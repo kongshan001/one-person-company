@@ -10,8 +10,10 @@ IconForge - AI 游戏图标生成器
 
 import argparse
 import hashlib
+import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -66,7 +68,13 @@ def build_prompt(user_prompt: str, style: str = None, asset_type: str = "icon") 
 
 def generate_image(prompt: str, seed: int = None, size: int = DEFAULT_SIZE,
                    output_path: str = None) -> str:
-    """调用 Pollinations.ai 生成单张图片"""
+    """调用 Pollinations.ai 生成单张图片
+    
+    当 output_path 为 None 时，写入临时文件并返回路径 str；
+    失败返回 None。
+    """
+    import tempfile
+    
     if seed is None:
         seed = int(time.time() * 1000) % 2**31
     
@@ -84,26 +92,30 @@ def generate_image(prompt: str, seed: int = None, size: int = DEFAULT_SIZE,
                 time.sleep(DELAY_BETWEEN_REQUESTS)
                 continue
             
-            if output_path:
-                # Pollinations 返回 JPEG, 先保存原始
-                raw_path = output_path + ".raw"
-                with open(raw_path, "wb") as f:
-                    f.write(data)
-                
-                # 转换为真正的 PNG
-                try:
-                    subprocess.run(
-                        ["convert", raw_path, output_path],
-                        check=True, capture_output=True, timeout=30
-                    )
-                    os.remove(raw_path)
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    # ImageMagick 不可用, 直接保存
-                    os.rename(raw_path, output_path)
-                
-                return output_path
+            # 如果未指定 output_path，创建临时文件
+            save_path = output_path
+            if save_path is None:
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                save_path = tmp.name
+                tmp.close()
             
-            return data  # 返回原始 bytes
+            # Pollinations 返回 JPEG, 先保存原始
+            raw_path = save_path + ".raw"
+            with open(raw_path, "wb") as f:
+                f.write(data)
+            
+            # 转换为真正的 PNG
+            try:
+                subprocess.run(
+                    ["convert", raw_path, save_path],
+                    check=True, capture_output=True, timeout=30
+                )
+                os.remove(raw_path)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # ImageMagick 不可用, 直接保存
+                os.rename(raw_path, save_path)
+            
+            return save_path
             
         except Exception as e:
             print(f"  ⚠️ 生成失败 (尝试 {attempt+1}/{MAX_RETRIES+1}): {e}")
@@ -128,26 +140,73 @@ def resize_image(input_path: str, target_size: int, output_path: str) -> bool:
         return False
 
 
-def quality_check(file_path: str) -> dict:
+def _read_png_dimensions(file_path: str) -> tuple:
+    """从 PNG 文件头读取宽高（无需外部依赖）"""
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(24)
+            if header[:8] == b'\x89PNG\r\n\x1a\n' and header[12:16] == b'IHDR':
+                width = int.from_bytes(header[16:20], 'big')
+                height = int.from_bytes(header[20:24], 'big')
+                return (width, height)
+    except Exception:
+        pass
+    return None
+
+
+def _get_image_dimensions(file_path: str) -> tuple:
+    """获取图片尺寸，优先用 identify，回退读 PNG header"""
+    try:
+        proc = subprocess.run(
+            ["identify", "-format", "%w %h", file_path],
+            capture_output=True, text=True, timeout=10
+        )
+        if proc.returncode == 0:
+            parts = proc.stdout.strip().split()
+            if len(parts) == 2:
+                return (int(parts[0]), int(parts[1]))
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    # 回退：读 PNG header
+    dims = _read_png_dimensions(file_path)
+    if dims:
+        return dims
+    return None
+
+
+def quality_check(file_path: str, expected_size: int = DEFAULT_SIZE) -> dict:
     """质检单张图片"""
     result = {"file": file_path, "passed": True, "issues": []}
     
+    # 文件大小校验
     size = os.path.getsize(file_path)
     if size < MIN_FILE_SIZE:
         result["passed"] = False
         result["issues"].append(f"文件太小: {size} bytes")
     
-    # 可以加更多检查: 分辨率, 感知哈希去重等
+    # 分辨率校验
+    dims = _get_image_dimensions(file_path)
+    if dims is not None:
+        w, h = dims
+        if w != expected_size or h != expected_size:
+            result["passed"] = False
+            result["issues"].append(
+                f"分辨率不匹配: 期望 {expected_size}x{expected_size}, 实际 {w}x{h}"
+            )
+    else:
+        result["issues"].append("无法读取分辨率（非 PNG 或 identify 不可用）")
+    
     return result
 
 
 def create_preview(output_dir: str, manifest: list, project_name: str):
     """创建 HTML 预览页"""
-    html = f"""<!DOCTYPE html>
+    safe_name = html.escape(project_name)
+    html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>{project_name} - Asset Preview</title>
+<title>{safe_name} - Asset Preview</title>
 <style>
   body {{ font-family: system-ui; background: #1a1a2e; color: #eee; padding: 20px; }}
   h1 {{ color: #e94560; }}
@@ -158,25 +217,26 @@ def create_preview(output_dir: str, manifest: list, project_name: str):
 </style>
 </head>
 <body>
-<h1>🎨 {project_name} - Generated Assets</h1>
+<h1>🎨 {safe_name} - Generated Assets</h1>
 <div class="grid">
 """
     for item in manifest:
         for size in SIZES:
             size_dir = f"size_{size}"
             rel_path = f"{size_dir}/{item['filename']}"
-            html += f"""<div class="card">
-  <img src="{rel_path}" alt="{item.get('prompt', item['filename'])}">
-  <div class="name">{item['filename']} ({size}px)</div>
+            safe_alt = html.escape(item.get('prompt', item['filename']))
+            html_content += f"""<div class="card">
+  <img src="{rel_path}" alt="{safe_alt}">
+  <div class="name">{html.escape(item['filename'])} ({size}px)</div>
 </div>\n"""
 
-    html += """</div>
+    html_content += """</div>
 </body>
 </html>"""
     
     preview_path = os.path.join(output_dir, "index.html")
     with open(preview_path, "w") as f:
-        f.write(html)
+        f.write(html_content)
     return preview_path
 
 
@@ -212,7 +272,10 @@ def run_batch(prompts: list, style: str, asset_type: str, output_dir: str,
         for j in range(count):
             stats["total"] += 1
             seed = int(time.time() * 1000 + i * 1000 + j) % 2**31
-            filename = f"{style or 'default'}_{prompt_text[:30].replace(' ', '_')}_{seed % 10000}.png"
+            safe_prompt = re.sub(r'[^a-zA-Z0-9_-]', '', prompt_text[:30])
+            if not safe_prompt:
+                safe_prompt = "icon"
+            filename = f"{style or 'default'}_{safe_prompt}_{seed % 10000}.png"
             
             # 生成原始 512x512
             raw_dir = os.path.join(output_dir, f"size_{DEFAULT_SIZE}")
@@ -297,7 +360,7 @@ def main():
     if args.prompt:
         prompts.append(args.prompt)
     if args.batch:
-        with open(args.batch) as f:
+        with open(args.batch, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#"):
