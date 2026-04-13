@@ -30,10 +30,11 @@ from pathlib import Path
 from threading import Thread
 import threading
 
-# 引入集中配置
+# 引入集中配置与共享工具
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config import PingBotConfig
+from utils import send_cors_headers, handle_options, send_json, send_html, parse_body
 
 
 # ============ 配置（引用集中配置） ============
@@ -162,6 +163,7 @@ class PingDB:
         return [dict(r) for r in rows]
     
     def get_status(self) -> list:
+        """获取所有启用目标的状态，含可用率和响应时间百分位统计"""
         targets = self.get_targets(enabled_only=True)
         result = []
         for t in targets:
@@ -179,14 +181,46 @@ class PingDB:
                 ).fetchone()
             
             uptime_pct = (stats["up_count"] / stats["total"] * 100) if stats["total"] else 0
-            
+
+            # 响应时间百分位统计 (最近24小时)
+            latency_stats = self._get_latency_stats(t["name"])
+
             result.append({
                 **t,
                 "last_check": dict(last) if last else None,
                 "uptime_24h": round(uptime_pct, 2),
                 "total_checks_24h": stats["total"],
+                "latency_24h": latency_stats,
             })
         return result
+
+    def _get_latency_stats(self, target_name: str) -> dict:
+        """计算目标最近24小时的响应时间百分位数
+
+        Args:
+            target_name: 监控目标名称
+
+        Returns:
+            包含 avg, p50, p95, p99 的字典
+        """
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT response_time_ms FROM checks WHERE target_name = ? AND is_up = 1 AND response_time_ms IS NOT NULL AND checked_at > datetime('now', '-24 hours')",
+                (target_name,)
+            ).fetchall()
+
+        values = [r["response_time_ms"] for r in rows if r["response_time_ms"] is not None]
+        if not values:
+            return {"avg": None, "p50": None, "p95": None, "p99": None}
+
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        avg = round(sum(sorted_vals) / n)
+        p50 = sorted_vals[int(n * 0.50)]
+        p95 = sorted_vals[min(int(n * 0.95), n - 1)]
+        p99 = sorted_vals[min(int(n * 0.99), n - 1)]
+
+        return {"avg": avg, "p50": p50, "p95": p95, "p99": p99}
     
     def cleanup_old(self):
         """清理旧记录（参数化查询）"""
@@ -286,35 +320,15 @@ class PingHandler(BaseHTTPRequestHandler):
             return auth[7:] == self.API_KEY
         return False
     
-    def _send_cors_headers(self):
-        """Send common CORS headers for cross-origin requests."""
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Max-Age", "86400")
-    
     def do_OPTIONS(self):
         """Handle CORS preflight requests."""
-        self.send_response(204)
-        self._send_cors_headers()
-        self.end_headers()
+        handle_options(self, allowed_headers="Content-Type, Authorization")
     
     def _send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self._send_cors_headers()
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+        send_json(self, data, status)
     
     def _read_body(self):
-        length = int(self.headers.get("Content-Length", 0))
-        if length:
-            raw = self.rfile.read(length).decode()
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return None  # 无效 JSON
-        return {}
+        return parse_body(self)
     
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
@@ -395,7 +409,7 @@ class PingHandler(BaseHTTPRequestHandler):
     def _send_dashboard(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self._send_cors_headers()
+        send_cors_headers(self, allowed_headers="Content-Type, Authorization")
         self.end_headers()
         # 简洁监控面板
         html = """<!DOCTYPE html>
@@ -421,7 +435,8 @@ button{background:#e94560;color:#fff;border:none;padding:8px 16px;border-radius:
 const load=()=>fetch('/api/status').then(r=>r.json()).then(d=>{
 document.getElementById('targets').innerHTML=d.targets.map(t=>{
 const last=t.last_check;const up=last?last.is_up:null;
-return '<div class="target"><div><span class="dot '+(up?'up':'down')+'"></span><strong>'+t.name+'</strong> <small>'+t.url+'</small></div><div>'+(last?'<span class="'+(up?'up':'down')+'">'+(up?'UP':'DOWN')+'</span> '+last.response_time_ms+'ms':'—')+' | Uptime: '+t.uptime_24h+'%</div></div>';
+const lat=t.latency_24h||{};const latStr=lat.p50?(' | Latency: P50 '+lat.p50+'ms / P95 '+lat.p95+'ms / P99 '+lat.p99+'ms'):'';
+return '<div class="target"><div><span class="dot '+(up?'up':'down')+'"></span><strong>'+t.name+'</strong> <small>'+t.url+'</small></div><div>'+(last?'<span class="'+(up?'up':'down')+'">'+(up?'UP':'DOWN')+'</span> '+last.response_time_ms+'ms':'—')+' | Uptime: '+t.uptime_24h+'%'+latStr+'</div></div>';
 }).join('')||'<p>No targets yet</p>';
 });
 document.getElementById('f').onsubmit=async e=>{e.preventDefault();const d={name:document.getElementById('n').value,url:document.getElementById('u').value,expected_status:parseInt(document.getElementById('s').value)};await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});load()};

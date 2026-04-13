@@ -21,10 +21,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Thread, Lock
 
-# 引入集中配置
+# 引入集中配置与共享工具
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config import PasteHutConfig
+from utils import send_cors_headers, handle_options, send_json, send_html, send_text, sanitize_id
 
 
 # ============ 配置（引用集中配置） ============
@@ -299,13 +300,25 @@ class PasteStore:
         
         return len(expired)
     
-    def list_recent(self, limit: int = 20) -> list:
-        """列出最近的 paste（不含敏感字段）"""
+    def list_recent(self, limit: int = 20, query: str = "") -> list:
+        """列出最近的 paste（不含敏感字段）
+
+        Args:
+            limit: 返回数量上限
+            query: 搜索关键词，匹配标题（不区分大小写），为空则不过滤
+
+        Returns:
+            安全字段列表
+        """
         pastes = sorted(
             self.meta.values(),
             key=lambda x: x["created_at"],
             reverse=True,
         )
+        # 搜索过滤
+        if query and query.strip():
+            q = query.strip().lower()
+            pastes = [p for p in pastes if q in p.get("title", "").lower()]
         # 过滤敏感字段
         safe_fields = {"id", "title", "syntax", "size", "created_at", "expires_at", "views", "burn_after_read", "has_password"}
         result = []
@@ -321,39 +334,18 @@ store = None  # 全局 store 实例
 
 class PasteHandler(BaseHTTPRequestHandler):
     
-    def _send_cors_headers(self):
-        """发送 CORS 跨域头（与 PingBot 一致）"""
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Delete-Key")
-        self.send_header("Access-Control-Max-Age", "86400")
-    
     def do_OPTIONS(self):
         """处理 CORS 预检请求"""
-        self.send_response(204)
-        self._send_cors_headers()
-        self.end_headers()
+        handle_options(self)
     
     def _send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self._send_cors_headers()
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+        send_json(self, data, status)
     
     def _send_html(self, html, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self._send_cors_headers()
-        self.end_headers()
-        self.wfile.write(html.encode())
+        send_html(self, html, status)
     
     def _send_text(self, text, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self._send_cors_headers()
-        self.end_headers()
-        self.wfile.write(text.encode())
+        send_text(self, text, status)
     
     def do_GET(self):
         path = urllib.parse.urlparse(self.path)
@@ -366,11 +358,12 @@ class PasteHandler(BaseHTTPRequestHandler):
         elif path.path == "/health":
             self._send_json({"status": "ok", "pastes": len(store.meta)})
         elif path.path == "/api/list":
-            pastes = store.list_recent()
+            query = params.get("q", [""])[0]
+            pastes = store.list_recent(query=query)
             self._send_json({"pastes": pastes})
         elif path.path.startswith("/raw/"):
             paste_id = path.path[5:]
-            if not re.fullmatch(r'[a-f0-9]+', paste_id):
+            if not sanitize_id(paste_id):
                 self._send_json({"error": "Invalid paste ID"}, 400)
                 return
             paste = store.get(paste_id, password=password)
@@ -385,7 +378,7 @@ class PasteHandler(BaseHTTPRequestHandler):
         elif path.path.startswith("/"):
             paste_id = path.path[1:]
             # 跳过静态资源路径
-            if paste_id and re.fullmatch(r'[a-f0-9]+', paste_id):
+            if paste_id and sanitize_id(paste_id):
                 paste = store.get(paste_id, password=password)
                 if paste is None:
                     self._send_html(self._render_404(), 404)
@@ -449,7 +442,7 @@ class PasteHandler(BaseHTTPRequestHandler):
         if path.path.startswith("/api/paste/"):
             paste_id = path.path[len("/api/paste/"):]
             # 输入校验：paste_id 必须是十六进制
-            if not re.fullmatch(r'[a-f0-9]+', paste_id):
+            if not sanitize_id(paste_id):
                 self._send_json({"error": "Invalid paste ID"}, 400)
                 return
             # 从 query string 或 header 获取 delete_key
@@ -499,10 +492,11 @@ const d={content:document.getElementById('c').value,title:document.getElementByI
 const res=await fetch('/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
 const j=await res.json();if(j.id){if(j.delete_key){console.log('Delete key:',j.delete_key);}location.href='/'+j.id;}else alert(j.error||'Error');
 };
-fetch('/api/list').then(r=>r.json()).then(d=>{
+const loadList=(q)=>{const url=q?'/api/list?q='+encodeURIComponent(q):'/api/list';fetch(url).then(r=>r.json()).then(d=>{
 const el=document.getElementById('r');
-if(d.pastes&&d.pastes.length){el.innerHTML='<h3>Recent</h3>'+d.pastes.map(p=>'<div><a href="/'+p.id+'">'+p.title+'</a> <small>('+p.syntax+', '+p.size+'B)</small></div>').join('')}
-});
+if(d.pastes&&d.pastes.length){el.innerHTML='<h3>Recent</h3><input id="sq" placeholder="🔍 Search..." value="'+(q||'').replace(/"/g,'&quot;')+'" style="background:#16213e;color:#eee;border:1px solid #333;padding:6px;border-radius:4px;margin-left:8px;width:200px">'+d.pastes.map(p=>'<div><a href="/'+p.id+'">'+p.title+'</a> <small>('+p.syntax+', '+p.size+'B)</small></div>').join('');document.getElementById('sq').oninput=function(){clearTimeout(window._st);window._st=setTimeout(()=>loadList(this.value),300);};}
+});};
+loadList('');
 </script></body></html>"""
     
     def _render_paste(self, paste):
