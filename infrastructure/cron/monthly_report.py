@@ -10,8 +10,13 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# 引入集中配置
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config import InfraConfig, PingBotConfig, PasteHutConfig
 
 
 def generate_report(month: str, output_dir: str) -> dict:
@@ -24,8 +29,8 @@ def generate_report(month: str, output_dir: str) -> dict:
         "infrastructure": {},
     }
     
-    # PingBot 统计
-    pingbot_db = os.path.expanduser("~/.pingbot/pingbot.db")
+    # PingBot 统计（从集中配置读取路径）
+    pingbot_db = PingBotConfig.DB_PATH
     if os.path.exists(pingbot_db):
         try:
             conn = sqlite3.connect(pingbot_db)
@@ -59,8 +64,8 @@ def generate_report(month: str, output_dir: str) -> dict:
         except Exception as e:
             report["infrastructure"]["uptime"] = {"error": str(e)}
     
-    # PasteHut 统计
-    pastehut_meta = os.path.expanduser("~/.pastehut/data/meta.json")
+    # PasteHut 统计（从集中配置读取路径）
+    pastehut_meta = str(Path(PasteHutConfig.DATA_DIR) / "meta.json")
     if os.path.exists(pastehut_meta):
         try:
             with open(pastehut_meta) as f:
@@ -110,7 +115,7 @@ def print_report(report: dict):
 def main():
     parser = argparse.ArgumentParser(description="Monthly Report")
     parser.add_argument("--month", default=datetime.now().strftime("%Y-%m"))
-    parser.add_argument("--output", default=os.path.expanduser("~/.onepersonco/reports"))
+    parser.add_argument("--output", default=InfraConfig.REPORT_DIR)
     args = parser.parse_args()
     
     report = generate_report(args.month, args.output)

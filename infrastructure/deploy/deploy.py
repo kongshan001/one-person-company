@@ -20,6 +20,10 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+# 引入集中配置
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from config import InfraConfig, PasteHutConfig, PingBotConfig
+
 # 项目根目录
 ROOT_DIR = Path(__file__).parent.parent
 
@@ -30,20 +34,20 @@ SERVICES = {
     },
     "paste-hut": {
         "script": str(ROOT_DIR / "products" / "paste-hut" / "server.py"),
-        "port": 9292,
+        "port": PasteHutConfig.DEFAULT_PORT,
         "type": "http",
     },
     "ping-bot": {
         "script": str(ROOT_DIR / "products" / "ping-bot" / "monitor.py"),
-        "port": 8081,
+        "port": PingBotConfig.DEFAULT_PORT,
         "type": "http",
     },
 }
 
-PID_DIR = Path("/tmp/onepersonco-pids")
+PID_DIR = Path(InfraConfig.PID_DIR)
 
-HEALTH_CHECK_TIMEOUT = 30  # 启动后健康检查等待秒数
-HEALTH_CHECK_INTERVAL = 2  # 每次检查间隔
+HEALTH_CHECK_TIMEOUT = InfraConfig.HEALTH_CHECK_TIMEOUT
+HEALTH_CHECK_INTERVAL = InfraConfig.HEALTH_CHECK_INTERVAL
 
 
 def get_pid(service_name: str) -> int:

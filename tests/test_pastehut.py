@@ -486,6 +486,74 @@ class TestPasteStoreIdGeneration(unittest.TestCase):
             self.assertNotIn(result["id"], ids, f"Duplicate ID generated: {result['id']}")
             ids.add(result["id"])
 
+    def test_check_duplicate_not_found(self):
+        """Test duplicate check with unique content"""
+        result = self.store.check_duplicate("unique content that doesn't exist yet")
+        self.assertFalse(result["is_duplicate"])
+        self.assertIsNone(result["existing_id"])
+
+    def test_check_duplicate_found(self):
+        """Test duplicate check with existing content"""
+        content = "this is duplicate test content"
+        created = self.store.create(
+            content=content, title="Original", syntax="text",
+            expiry_hours=24, ip="127.0.0.1",
+        )
+        # Check duplicate with same content
+        result = self.store.check_duplicate(content)
+        self.assertTrue(result["is_duplicate"])
+        self.assertEqual(result["existing_id"], created["id"])
+
+    def test_check_duplicate_after_delete(self):
+        """Test duplicate check after deleting the original paste"""
+        content = "content to be deleted"
+        created = self.store.create(
+            content=content, title="To Delete", syntax="text",
+            expiry_hours=24, ip="127.0.0.1",
+        )
+        # Verify it's detected as duplicate
+        result = self.store.check_duplicate(content)
+        self.assertTrue(result["is_duplicate"])
+        # Delete the paste
+        self.store.delete(created["id"])
+        # Duplicate check should now return False
+        result = self.store.check_duplicate(content)
+        self.assertFalse(result["is_duplicate"])
+
+    def test_search_by_tag(self):
+        """Test search filtering by tag in list_recent"""
+        self.store.create(
+            content="tagged content", title="Tagged",
+            syntax="text", expiry_hours=24, ip="127.0.0.1",
+            tags=["python", "tutorial"],
+        )
+        self.store.create(
+            content="untagged content", title="No Tag",
+            syntax="text", expiry_hours=24, ip="127.0.0.1",
+        )
+        # Search by tag keyword
+        result = self.store.list_recent(query="python")
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["pastes"][0]["title"], "Tagged")
+
+    def test_search_content_mode(self):
+        """Test full content search with search_content=True"""
+        self.store.create(
+            content="def hello_world(): pass", title="Code",
+            syntax="python", expiry_hours=24, ip="127.0.0.1",
+        )
+        self.store.create(
+            content="no match here", title="Other",
+            syntax="text", expiry_hours=24, ip="127.0.0.1",
+        )
+        # Quick search (title+tags only) should not find content match
+        result = self.store.list_recent(query="hello_world")
+        self.assertEqual(result["total"], 0)
+        # Content search should find it
+        result = self.store.list_recent(query="hello_world", search_content=True)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["pastes"][0]["title"], "Code")
+
 
 if __name__ == "__main__":
     unittest.main()

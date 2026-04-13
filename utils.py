@@ -34,6 +34,7 @@ __all__ = [
     "format_bytes",
     "parse_duration",
     "get_logger",
+    "read_png_dimensions",
 ]
 
 
@@ -392,4 +393,28 @@ def parse_duration(duration_str: str) -> Optional[int]:
             num_part = duration_str[:-1]
             if num_part.isdigit():
                 return int(num_part) * multiplier
+    return None
+
+
+def read_png_dimensions(file_path: str) -> Optional[tuple]:
+    """从 PNG 文件头读取宽高（无需外部依赖）
+
+    仅读取文件头 24 字节，解析 IHDR 块中的宽高信息。
+    适用于 IconForge、PasteHut 等需要快速获取 PNG 尺寸的场景。
+
+    Args:
+        file_path: PNG 文件路径
+
+    Returns:
+        (width, height) 元组，非 PNG 或读取失败返回 None
+    """
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(24)
+            if header[:8] == b'\x89PNG\r\n\x1a\n' and header[12:16] == b'IHDR':
+                width = int.from_bytes(header[16:20], 'big')
+                height = int.from_bytes(header[20:24], 'big')
+                return (width, height)
+    except Exception:
+        pass
     return None

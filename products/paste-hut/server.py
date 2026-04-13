@@ -67,6 +67,9 @@ class PasteStore:
         # 过期索引：{paste_id: expires_at_iso}，用于增量清理
         self._expiry_index = {}
         self._rebuild_expiry_index()
+        # 内容哈希索引：{sha256_hex[:16]: paste_id}，用于检测重复内容
+        self._content_hash_index = {}
+        self._rebuild_content_hash_index()
 
     def get_stats(self) -> dict:
         """获取 PasteHut 的聚合统计数据
@@ -106,21 +109,62 @@ class PasteStore:
         return {}
     
     def _rebuild_expiry_index(self):
-        """从 meta 构建过期索引，用于增量清理而非全量扫描"""
+        """从 meta 构建过期索引，用于增量清理而非全量扫描
+        
+        索引包含所有有 expires_at 字段的 paste（包括已过期的），
+        以便 cleanup_expired 能正确识别并清理它们。
+        """
         self._expiry_index.clear()
-        now_iso = datetime.utcnow().isoformat()
         for paste_id, info in self.meta.items():
-            expires = info.get("expires")
-            if expires and expires > now_iso:
+            expires = info.get("expires_at")
+            if not expires:
+                continue
+            try:
+                # 验证日期格式是否可解析
+                expires_dt = datetime.fromisoformat(expires)
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
                 self._expiry_index[paste_id] = expires
+            except (ValueError, TypeError):
+                # 无法解析的过期时间，跳过
+                pass
 
     def _update_expiry_index(self, paste_id: str, info: dict):
         """创建/更新单个 paste 的过期索引条目"""
-        expires = info.get("expires")
+        expires = info.get("expires_at")
         if expires:
             self._expiry_index[paste_id] = expires
         else:
             self._expiry_index.pop(paste_id, None)
+
+    def _rebuild_content_hash_index(self):
+        """从磁盘文件重建内容哈希索引，用于快速检测重复内容"""
+        self._content_hash_index.clear()
+        for paste_id in self.meta:
+            paste_file = self.data_dir / f"{paste_id}.txt"
+            if paste_file.exists():
+                try:
+                    content = paste_file.read_text()
+                    content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+                    # 保留最新的 paste_id（如果多个 paste 内容相同）
+                    self._content_hash_index[content_hash] = paste_id
+                except IOError:
+                    pass
+
+    def check_duplicate(self, content: str) -> dict:
+        """检查内容是否已存在
+
+        Args:
+            content: 要检查的文本内容
+
+        Returns:
+            包含 is_duplicate 和 existing_id 的字典；如不重复则 existing_id 为 None
+        """
+        content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+        existing_id = self._content_hash_index.get(content_hash)
+        if existing_id and existing_id in self.meta:
+            return {"is_duplicate": True, "existing_id": existing_id}
+        return {"is_duplicate": False, "existing_id": None}
 
     def _save_meta(self):
         """保存 meta 到磁盘（带文件锁）"""
@@ -273,6 +317,9 @@ class PasteStore:
         }
         self._save_meta()
         self._update_expiry_index(paste_id, self.meta[paste_id])
+        # 更新内容哈希索引
+        content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+        self._content_hash_index[content_hash] = paste_id
         
         result = dict(self.meta[paste_id])
         result["delete_key"] = delete_key  # 创建时返回 delete_key
@@ -344,7 +391,17 @@ class PasteStore:
             paste_file = self.data_dir / f"{paste_id}.txt"
             if paste_file.exists():
                 paste_file.unlink()
+            # 清除内容哈希索引中对应的条目
+            meta = self.meta[paste_id]
             del self.meta[paste_id]
+            # 反向查找并移除哈希索引（安全：即使哈希冲突也只移除当前 paste_id 的映射）
+            hash_to_remove = None
+            for h, pid in list(self._content_hash_index.items()):
+                if pid == paste_id:
+                    hash_to_remove = h
+                    break
+            if hash_to_remove:
+                del self._content_hash_index[hash_to_remove]
             # 清除脏 views
             with self._flush_lock:
                 self._views_dirty.pop(paste_id, None)
@@ -365,15 +422,22 @@ class PasteStore:
     def cleanup_expired(self) -> int:
         """基于过期索引增量清理过期 paste，避免全量扫描
 
-        通过 _expiry_index 只检查有 expires 字段的 paste，
+        通过 _expiry_index 只检查有 expires_at 字段的 paste，
         相比遍历全部 meta 大幅减少比较次数。
         清理完成后自动更新索引。
         """
-        now_iso = datetime.utcnow().isoformat()
-        expired = [
-            pid for pid, exp in self._expiry_index.items()
-            if exp <= now_iso
-        ]
+        now = datetime.now(timezone.utc)
+        expired = []
+        for pid, exp in list(self._expiry_index.items()):
+            try:
+                exp_dt = datetime.fromisoformat(exp)
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                if exp_dt <= now:
+                    expired.append(pid)
+            except (ValueError, TypeError):
+                # 无法解析的过期时间，视为已过期以触发重建
+                expired.append(pid)
 
         for pid in expired:
             self.delete(pid)
@@ -381,17 +445,33 @@ class PasteStore:
 
         return len(expired)
     
+    # 安全字段白名单，用于列表返回（不含密码哈希、delete_key等敏感字段）
+    _SAFE_FIELDS = frozenset({
+        "id", "title", "syntax", "size", "created_at", "expires_at",
+        "views", "burn_after_read", "has_password", "tags",
+    })
+
+    def _filter_safe_fields(self, paste_meta: dict) -> dict:
+        """过滤敏感字段，返回安全视图，同时包含实时 views 计数"""
+        current_views = paste_meta.get("views", 0) + self._views_dirty.get(paste_meta.get("id", ""), 0)
+        item = {k: v for k, v in paste_meta.items() if k in self._SAFE_FIELDS}
+        item["views"] = current_views
+        return item
+
     def list_recent(self, limit: int = 20, query: str = "",
                     offset: int = 0, sort_by: str = "created_at",
-                    sort_order: str = "desc") -> dict:
+                    sort_order: str = "desc",
+                    search_content: bool = False) -> dict:
         """列出最近的 paste（不含敏感字段），支持分页和排序
 
         Args:
             limit: 返回数量上限
-            query: 搜索关键词，匹配标题（不区分大小写），为空则不过滤
+            query: 搜索关键词，匹配标题和标签（不区分大小写），为空则不过滤；
+                   若 search_content=True，也匹配内容文本
             offset: 分页偏移量，从0开始
             sort_by: 排序字段，可选 created_at 或 views
             sort_order: 排序方向，desc 降序 / asc 升序
+            search_content: 是否搜索内容文本（较慢，默认仅搜标题和标签）
 
         Returns:
             包含 pastes 列表、total 总数、offset、limit 的分页字典
@@ -406,10 +486,32 @@ class PasteStore:
 
         pastes = list(self.meta.values())
 
-        # 搜索过滤
+        # 搜索过滤 — 默认搜标题+标签，可选搜内容
         if query and query.strip():
             q = query.strip().lower()
-            pastes = [p for p in pastes if q in p.get("title", "").lower()]
+            if search_content:
+                # 内容搜索：需读取文件，较慢但更全面
+                def _matches(p: dict) -> bool:
+                    if q in p.get("title", "").lower():
+                        return True
+                    # 搜索标签
+                    if any(q in t.lower() for t in p.get("tags", [])):
+                        return True
+                    # 搜索内容
+                    paste_file = self.data_dir / f"{p.get('id', '')}.txt"
+                    if paste_file.exists():
+                        try:
+                            content = paste_file.read_text()
+                            if q in content.lower():
+                                return True
+                        except IOError:
+                            pass
+                    return False
+                pastes = [p for p in pastes if _matches(p)]
+            else:
+                # 快速搜索：仅标题+标签
+                pastes = [p for p in pastes if q in p.get("title", "").lower()
+                          or any(q in t.lower() for t in p.get("tags", []))]
 
         total = len(pastes)
 
@@ -423,15 +525,8 @@ class PasteStore:
         # 分页
         page_pastes = pastes[offset:offset + limit]
 
-        # 过滤敏感字段
-        safe_fields = {"id", "title", "syntax", "size", "created_at", "expires_at", "views", "burn_after_read", "has_password", "tags"}
-        result = []
-        for p in page_pastes:
-            # views 需包含脏计数
-            current_views = p.get("views", 0) + self._views_dirty.get(p.get("id", ""), 0)
-            item = {k: v for k, v in p.items() if k in safe_fields}
-            item["views"] = current_views
-            result.append(item)
+        # 过滤敏感字段（使用统一方法）
+        result = [self._filter_safe_fields(p) for p in page_pastes]
 
         return {
             "pastes": result,
@@ -461,11 +556,7 @@ class PasteStore:
         for p in self.meta.values():
             paste_tags = [t.lower() for t in p.get("tags", [])]
             if tag_lower in paste_tags:
-                current_views = p.get("views", 0) + self._views_dirty.get(p.get("id", ""), 0)
-                safe_fields = {"id", "title", "syntax", "size", "created_at", "expires_at", "views", "burn_after_read", "has_password", "tags"}
-                item = {k: v for k, v in p.items() if k in safe_fields}
-                item["views"] = current_views
-                matching.append(item)
+                matching.append(self._filter_safe_fields(p))
 
         matching.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         total = len(matching)
@@ -529,6 +620,13 @@ class PasteHandler(BaseHTTPRequestHandler):
             self._send_json({"status": "ok", "pastes": len(store.meta)})
         elif path.path == "/api/stats":
             self._send_json(store.get_stats())
+        elif path.path == "/api/duplicate":
+            # 重复检测 API：传入 content 参数检查是否已有相同内容
+            content = params.get("content", [""])[0]
+            if not content:
+                self._send_json({"error": "content parameter required"}, 400)
+            else:
+                self._send_json(store.check_duplicate(content))
         elif path.path == "/api/tags":
             self._send_json(store.get_all_tags())
         elif path.path.startswith("/api/tags/"):
@@ -558,9 +656,11 @@ class PasteHandler(BaseHTTPRequestHandler):
                 offset = 0
             sort_by = params.get("sort", ["created_at"])[0]
             sort_order = params.get("order", ["desc"])[0]
+            search_content = params.get("search_content", ["false"])[0].lower() in ("true", "1", "yes")
             result = store.list_recent(
                 limit=limit, query=query, offset=offset,
                 sort_by=sort_by, sort_order=sort_order,
+                search_content=search_content,
             )
             self._send_json(result)
         elif path.path.startswith("/raw/"):
@@ -773,7 +873,12 @@ a{{color:#e94560}}
 <body><h1>404</h1><p>This paste doesn't exist or has expired.</p><a href="/">← Go home</a></body></html>"""
     
     def log_message(self, format, *args):
-        log.info("%s", args[0] if args else "")
+        """结构化请求日志：记录 method/path/status/耗时"""
+        log.info("%s %s %s %s",
+                 self.command,
+                 self.path,
+                 getattr(self, '_status_code', '-'),
+                 getattr(self, '_request_duration_ms', '-'))
 
 
 # ============ 过期清理线程 ============

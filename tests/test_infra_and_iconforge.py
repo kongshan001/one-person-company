@@ -192,14 +192,15 @@ class TestIconForge(unittest.TestCase):
 
     def test_build_prompt(self):
         """Test prompt building for AI generation"""
-        prompt = self.mod.build_prompt("sword", style="pixel", asset_type="icon")
-        self.assertIn("sword", prompt)
-        self.assertIn("pixel", prompt.lower())
+        result = self.mod.build_prompt("sword", style="pixel", asset_type="icon")
+        self.assertIn("sword", result["prompt"])
+        self.assertIn("pixel", result["prompt"].lower())
+        self.assertTrue(len(result.get("negative", "")) > 0)  # V2 returns negative prompt
 
     def test_build_prompt_no_style(self):
         """Test prompt building without style"""
-        prompt = self.mod.build_prompt("shield", style=None, asset_type="icon")
-        self.assertIn("shield", prompt)
+        result = self.mod.build_prompt("shield", style=None, asset_type="icon")
+        self.assertIn("shield", result["prompt"])
 
     def test_quality_check_missing_file(self):
         """Test quality check on non-existent file raises FileNotFoundError"""

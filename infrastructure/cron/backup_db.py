@@ -11,11 +11,16 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_BACKUP_DIR = os.path.expanduser("~/.onepersonco/backups")
-RETENTION_DAYS = 30
+# 引入集中配置
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config import InfraConfig, PingBotConfig, PasteHutConfig
+
+DEFAULT_BACKUP_DIR = InfraConfig.BACKUP_DIR
+RETENTION_DAYS = InfraConfig.RETENTION_DAYS
 
 
 def _sha256_file(filepath: str) -> str:
@@ -88,10 +93,10 @@ def main():
     if args.db:
         dbs = [args.db]
     else:
-        # 自动发现
+        # 自动发现（从集中配置读取路径）
         candidates = [
-            os.path.expanduser("~/.pingbot/pingbot.db"),
-            os.path.expanduser("~/.pastehut/data/meta.json"),
+            PingBotConfig.DB_PATH,
+            str(Path(PasteHutConfig.DATA_DIR) / "meta.json"),
         ]
         for db in candidates:
             if os.path.exists(db):

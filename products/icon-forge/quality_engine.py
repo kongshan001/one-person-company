@@ -14,8 +14,13 @@ IconForge 质检引擎 V2
 import hashlib
 import os
 import struct
+import sys
 from collections import Counter
 from pathlib import Path
+
+# 引入共享工具
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from utils import read_png_dimensions
 
 
 # ============ 配置 ============
@@ -48,7 +53,7 @@ def check_basic(file_path: str, expected_size: int = 512) -> dict:
         result["scores"]["file_size"] = min(100, 60 + (file_size / 50000) * 20)
     
     # 分辨率
-    dims = _read_png_dimensions(file_path)
+    dims = read_png_dimensions(file_path)
     if dims:
         w, h = dims
         result["dimensions"] = (w, h)
@@ -373,20 +378,6 @@ def quality_check_v2(file_path: str, expected_size: int = 512,
 
 
 # ============ PNG 读取辅助 ============
-
-def _read_png_dimensions(file_path: str) -> tuple:
-    """从 PNG header 读宽高"""
-    try:
-        with open(file_path, "rb") as f:
-            header = f.read(24)
-            if header[:8] == b'\x89PNG\r\n\x1a\n' and header[12:16] == b'IHDR':
-                w = int.from_bytes(header[16:20], 'big')
-                h = int.from_bytes(header[20:24], 'big')
-                return (w, h)
-    except Exception:
-        pass
-    return None
-
 
 def _read_png_pixels(file_path: str, max_pixels: int = 65536) -> list:
     """

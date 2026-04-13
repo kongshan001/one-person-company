@@ -36,7 +36,7 @@ import threading
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config import PingBotConfig
-from utils import send_cors_headers, handle_options, send_json, send_html, parse_body, get_logger
+from utils import send_cors_headers, handle_options, send_json, send_html, parse_body, get_logger, validate_url, compute_percentiles
 
 
 # ============ 配置（引用集中配置） ============
@@ -137,6 +137,8 @@ class PingDB:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # 启用 WAL 模式，提升并发读写性能
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.lock = threading.Lock()
         self._init_tables()
     
@@ -174,9 +176,9 @@ class PingDB:
         # Validate name: only [a-zA-Z0-9_-]
         if not re.fullmatch(r'[a-zA-Z0-9_-]+', name):
             return {"error": "name must contain only alphanumeric characters, underscores, and hyphens"}
-        # Validate url: must start with http:// or https://
-        if not url.startswith("http://") and not url.startswith("https://"):
-            return {"error": "url must start with http:// or https://"}
+        # Validate url: 使用 validate_url 进行 SSRF 防护
+        if not validate_url(url):
+            return {"error": "url must be a valid http/https URL (private/internal addresses are blocked)"}
         with self.lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO targets (name, url, method, expected_status, expected_keyword, interval) VALUES (?, ?, ?, ?, ?, ?)",
@@ -290,14 +292,9 @@ class PingDB:
         if not values:
             return {"avg": None, "p50": None, "p95": None, "p99": None}
 
-        sorted_vals = sorted(values)
-        n = len(sorted_vals)
-        avg = round(sum(sorted_vals) / n)
-        p50 = sorted_vals[int(n * 0.50)]
-        p95 = sorted_vals[min(int(n * 0.95), n - 1)]
-        p99 = sorted_vals[min(int(n * 0.99), n - 1)]
-
-        return {"avg": avg, "p50": p50, "p95": p95, "p99": p99}
+        avg = round(sum(values) / len(values))
+        percentiles = compute_percentiles(values, [50, 95, 99])
+        return {"avg": avg, **percentiles}
     
     def cleanup_old(self):
         """清理旧记录（参数化查询）"""
@@ -439,8 +436,8 @@ class PingHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Invalid JSON body"}, 400)
                 return
             url = data.get("url", "")
-            if not url.startswith("http://") and not url.startswith("https://"):
-                self._send_json({"error": "url must start with http:// or https://"}, 400)
+            if not validate_url(url):
+                self._send_json({"error": "url must be a valid http/https URL (private/internal addresses are blocked)"}, 400)
                 return
             result = pinger.check_url(
                 url,
@@ -549,7 +546,11 @@ load();setInterval(load,30000);
         self.wfile.write(html.encode())
     
     def log_message(self, format, *args):
-        log.info("%s", args[0] if args else "")
+        """结构化请求日志：记录 method/path/status"""
+        log.info("%s %s %s",
+                 self.command,
+                 self.path,
+                 getattr(self, '_status_code', '-'))
 
 
 # ============ 入口 ============

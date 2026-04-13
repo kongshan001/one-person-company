@@ -17,6 +17,11 @@ import subprocess
 import sys
 import urllib.request
 from datetime import datetime
+from pathlib import Path
+
+# 引入共享工具
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from utils import send_json as _send_json_util, send_html as _send_html_util, send_cors_headers as _send_cors
 
 
 # ============ 检查项 ============
@@ -284,7 +289,7 @@ def serve_http(port: int = 9100, host: str = "0.0.0.0"):
             results = run_checks()
 
             if path == "/health":
-                self._send_json(results)
+                self._send_json_resp(results)
             elif path == "/metrics":
                 prom_text = format_prometheus(results)
                 self.send_response(200)
@@ -294,14 +299,11 @@ def serve_http(port: int = 9100, host: str = "0.0.0.0"):
             elif path == "/":
                 self._send_dashboard(results)
             else:
-                self._send_json({"error": "Not found"}, 404)
+                self._send_json_resp({"error": "Not found"}, 404)
 
-        def _send_json(self, data: dict, status: int = 200):
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+        def _send_json_resp(self, data: dict, status: int = 200):
+            """发送 JSON 响应（使用 utils.send_json）"""
+            _send_json_util(self, data, status=status)
 
         def _send_dashboard(self, results: dict):
             status_emoji = {"healthy": "✅", "degraded": "⚠️", "down": "❌", "ok": "✅", "warning": "⚠️", "up": "🟢", "error": "🔴"}
@@ -345,11 +347,7 @@ def serve_http(port: int = 9100, host: str = "0.0.0.0"):
             html_parts.append("<script>setTimeout(()=>location.reload(),30000)</script>")
             html_parts.append("</body></html>")
             html = "\n".join(html_parts)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(html.encode())
+            _send_html_util(self, html)
 
         def log_message(self, format, *args):
             print(f"[HealthCheck] {args[0]}")

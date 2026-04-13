@@ -8,8 +8,13 @@
 
 import argparse
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# 引入集中配置
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config import InfraConfig
 
 
 def clean_logs(log_dir: str, days: int = 7, dry_run: bool = False):
@@ -43,8 +48,8 @@ def clean_logs(log_dir: str, days: int = 7, dry_run: bool = False):
 
 def main():
     parser = argparse.ArgumentParser(description="Log Cleanup")
-    parser.add_argument("--dir", default=os.path.expanduser("~/.onepersonco/logs/"), help="Log directory")
-    parser.add_argument("--days", type=int, default=7, help="Retain days")
+    parser.add_argument("--dir", default=InfraConfig.LOG_DIR, help="Log directory")
+    parser.add_argument("--days", type=int, default=InfraConfig.LOG_RETENTION_DAYS, help="Retain days")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be deleted without actually deleting")
     args = parser.parse_args()
     
