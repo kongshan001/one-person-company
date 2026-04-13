@@ -36,7 +36,7 @@ import threading
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config import PingBotConfig
-from utils import send_cors_headers, handle_options, send_json, send_html, parse_body
+from utils import send_cors_headers, handle_options, send_json, send_html, parse_body, get_logger
 
 
 # ============ 配置（引用集中配置） ============
@@ -48,6 +48,8 @@ MAX_HISTORY_DAYS = PingBotConfig.MAX_HISTORY_DAYS
 MAX_BODY_READ = PingBotConfig.MAX_BODY_READ
 
 ALERT_WEBHOOK_URL = PingBotConfig.ALERT_WEBHOOK_URL
+
+log = get_logger("PingBot")
 
 
 # ============ 告警通知 ============
@@ -101,7 +103,7 @@ def send_alert(target_name: str, url: str, error: str, cooldown: int = None) -> 
         _last_alert_time[target_name] = now
         return True
     except Exception as e:
-        print(f"[PingBot] Alert webhook failed: {e}")
+        log.warning("Alert webhook failed: %s", e)
         return False
 
 
@@ -375,7 +377,7 @@ class Pinger:
             try:
                 self.check_all()
             except Exception as e:
-                print(f"[PingBot] check_all error: {e}")
+                log.error("check_all error: %s", e)
             time.sleep(CHECK_INTERVAL)
 
 
@@ -547,7 +549,7 @@ load();setInterval(load,30000);
         self.wfile.write(html.encode())
     
     def log_message(self, format, *args):
-        print(f"[PingBot] {args[0]}")
+        log.info("%s", args[0] if args else "")
 
 
 # ============ 入口 ============
@@ -568,13 +570,13 @@ def main():
     checker_thread.start()
     
     server = HTTPServer((args.host, args.port), PingHandler)
-    print(f"🤖 PingBot running on http://{args.host}:{args.port}")
+    log.info("PingBot running on http://%s:%d", args.host, args.port)
     
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pinger.running = False
-        print("\n👋 PingBot stopped")
+        log.info("PingBot stopped")
         server.server_close()
 
 

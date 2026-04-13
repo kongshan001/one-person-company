@@ -11,6 +11,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -25,7 +26,9 @@ from threading import Thread, Lock
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config import PasteHutConfig
-from utils import send_cors_headers, handle_options, send_json, send_html, send_text, sanitize_id
+from utils import send_cors_headers, handle_options, send_json, send_html, send_text, sanitize_id, truncate_text, format_bytes, get_logger
+
+log = get_logger("PasteHut")
 
 
 # ============ 配置（引用集中配置） ============
@@ -43,6 +46,9 @@ ALLOWED_SYNTAXES = PasteHutConfig.ALLOWED_SYNTAXES
 VIEWS_FLUSH_INTERVAL = PasteHutConfig.VIEWS_FLUSH_INTERVAL
 VIEWS_FLUSH_SECONDS = PasteHutConfig.VIEWS_FLUSH_SECONDS
 
+# 过期清理配置
+CLEANUP_INTERVAL_SECONDS = int(os.environ.get("PASTEHUT_CLEANUP_INTERVAL", "600"))  # 默认10分钟
+
 
 # ============ 存储 ============
 
@@ -58,6 +64,9 @@ class PasteStore:
         self._views_total_dirty = 0
         self._last_flush = time.time()
         self._flush_lock = Lock()
+        # 过期索引：{paste_id: expires_at_iso}，用于增量清理
+        self._expiry_index = {}
+        self._rebuild_expiry_index()
 
     def get_stats(self) -> dict:
         """获取 PasteHut 的聚合统计数据
@@ -96,6 +105,23 @@ class PasteStore:
                 return {}
         return {}
     
+    def _rebuild_expiry_index(self):
+        """从 meta 构建过期索引，用于增量清理而非全量扫描"""
+        self._expiry_index.clear()
+        now_iso = datetime.utcnow().isoformat()
+        for paste_id, info in self.meta.items():
+            expires = info.get("expires")
+            if expires and expires > now_iso:
+                self._expiry_index[paste_id] = expires
+
+    def _update_expiry_index(self, paste_id: str, info: dict):
+        """创建/更新单个 paste 的过期索引条目"""
+        expires = info.get("expires")
+        if expires:
+            self._expiry_index[paste_id] = expires
+        else:
+            self._expiry_index.pop(paste_id, None)
+
     def _save_meta(self):
         """保存 meta 到磁盘（带文件锁）"""
         self.meta_file.parent.mkdir(parents=True, exist_ok=True)
@@ -159,7 +185,8 @@ class PasteStore:
     
     def create(self, content: str, title: str = "", syntax: str = "text",
                expiry_hours: int = None, ip: str = "unknown",
-               burn_after_read: bool = False, password: str = "") -> dict:
+               burn_after_read: bool = False, password: str = "",
+               tags: list = None) -> dict:
         """创建 paste
         
         Args:
@@ -170,6 +197,7 @@ class PasteStore:
             ip: 创建者 IP
             burn_after_read: 阅后即焚，首次查看后自动删除
             password: 访问密码（可选，空字符串表示无密码）
+            tags: 标签列表（可选，最多5个，每个最长32字符）
         
         Returns:
             创建结果字典，含 id、delete_key 等；失败时含 error
@@ -210,6 +238,23 @@ class PasteStore:
             password_hash = self._hash_password(password.strip())
             has_password = True
         
+        # 处理标签：清洗、去重、限制数量
+        clean_tags = []
+        if tags and isinstance(tags, list):
+            seen = set()
+            for tag in tags:
+                if not isinstance(tag, str):
+                    continue
+                tag = tag.strip().lower()
+                if not tag or len(tag) > 32:
+                    continue
+                # 只允许字母数字、连字符、下划线、中文
+                if re.fullmatch(r'[\w\u4e00-\u9fff-]+', tag) and tag not in seen:
+                    clean_tags.append(tag)
+                    seen.add(tag)
+                if len(clean_tags) >= 5:
+                    break
+        
         # 保存元数据
         self.meta[paste_id] = {
             "id": paste_id,
@@ -224,8 +269,10 @@ class PasteStore:
             "burn_after_read": burn_after_read,
             "has_password": has_password,
             "password_hash": password_hash,
+            "tags": clean_tags,
         }
         self._save_meta()
+        self._update_expiry_index(paste_id, self.meta[paste_id])
         
         result = dict(self.meta[paste_id])
         result["delete_key"] = delete_key  # 创建时返回 delete_key
@@ -316,17 +363,22 @@ class PasteStore:
         return {"deleted": paste_id}
     
     def cleanup_expired(self) -> int:
-        """清理过期 paste"""
-        now = datetime.now(timezone.utc)
-        expired = []
-        for pid, meta in self.meta.items():
-            expires_at = datetime.fromisoformat(meta["expires_at"])
-            if now > expires_at:
-                expired.append(pid)
-        
+        """基于过期索引增量清理过期 paste，避免全量扫描
+
+        通过 _expiry_index 只检查有 expires 字段的 paste，
+        相比遍历全部 meta 大幅减少比较次数。
+        清理完成后自动更新索引。
+        """
+        now_iso = datetime.utcnow().isoformat()
+        expired = [
+            pid for pid, exp in self._expiry_index.items()
+            if exp <= now_iso
+        ]
+
         for pid in expired:
             self.delete(pid)
-        
+            self._expiry_index.pop(pid, None)
+
         return len(expired)
     
     def list_recent(self, limit: int = 20, query: str = "",
@@ -372,7 +424,7 @@ class PasteStore:
         page_pastes = pastes[offset:offset + limit]
 
         # 过滤敏感字段
-        safe_fields = {"id", "title", "syntax", "size", "created_at", "expires_at", "views", "burn_after_read", "has_password"}
+        safe_fields = {"id", "title", "syntax", "size", "created_at", "expires_at", "views", "burn_after_read", "has_password", "tags"}
         result = []
         for p in page_pastes:
             # views 需包含脏计数
@@ -389,6 +441,60 @@ class PasteStore:
             "sort_by": sort_by,
             "sort_order": sort_order,
         }
+    
+    def list_by_tag(self, tag: str, limit: int = 20, offset: int = 0) -> dict:
+        """按标签检索 paste 列表
+
+        Args:
+            tag: 标签名（大小写不敏感）
+            limit: 返回数量上限
+            offset: 分页偏移量
+
+        Returns:
+            包含匹配 pastes、tag 名称、total 的字典
+        """
+        tag_lower = tag.strip().lower()
+        if not tag_lower:
+            return {"tag": tag, "pastes": [], "total": 0}
+
+        matching = []
+        for p in self.meta.values():
+            paste_tags = [t.lower() for t in p.get("tags", [])]
+            if tag_lower in paste_tags:
+                current_views = p.get("views", 0) + self._views_dirty.get(p.get("id", ""), 0)
+                safe_fields = {"id", "title", "syntax", "size", "created_at", "expires_at", "views", "burn_after_read", "has_password", "tags"}
+                item = {k: v for k, v in p.items() if k in safe_fields}
+                item["views"] = current_views
+                matching.append(item)
+
+        matching.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        total = len(matching)
+        page = matching[offset:offset + limit]
+
+        return {
+            "tag": tag_lower,
+            "pastes": page,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
+
+    def get_all_tags(self) -> dict:
+        """获取所有标签及其对应的 paste 数量
+
+        Returns:
+            包含 tags 列表（每项含 name 和 count）的字典
+        """
+        tag_counts: dict = {}
+        for p in self.meta.values():
+            for tag in p.get("tags", []):
+                tag_lower = tag.lower()
+                tag_counts[tag_lower] = tag_counts.get(tag_lower, 0) + 1
+        tags_list = [
+            {"name": name, "count": count}
+            for name, count in sorted(tag_counts.items(), key=lambda x: -x[1])
+        ]
+        return {"tags": tags_list, "unique_count": len(tags_list)}
 
 
 # ============ HTTP 服务 ============
@@ -423,6 +529,21 @@ class PasteHandler(BaseHTTPRequestHandler):
             self._send_json({"status": "ok", "pastes": len(store.meta)})
         elif path.path == "/api/stats":
             self._send_json(store.get_stats())
+        elif path.path == "/api/tags":
+            self._send_json(store.get_all_tags())
+        elif path.path.startswith("/api/tags/"):
+            tag = path.path[len("/api/tags/"):]
+            try:
+                limit = int(params.get("limit", ["20"])[0])
+                limit = max(1, min(limit, 100))
+            except (ValueError, IndexError):
+                limit = 20
+            try:
+                offset = int(params.get("offset", ["0"])[0])
+                offset = max(0, offset)
+            except (ValueError, IndexError):
+                offset = 0
+            self._send_json(store.list_by_tag(tag, limit=limit, offset=offset))
         elif path.path == "/api/list":
             query = params.get("q", [""])[0]
             try:
@@ -509,6 +630,7 @@ class PasteHandler(BaseHTTPRequestHandler):
             ip=ip,
             burn_after_read=bool(data.get("burn_after_read", False)),
             password=data.get("password", ""),
+            tags=data.get("tags", []),
         )
         
         if "error" in result:
@@ -563,19 +685,20 @@ button:hover{background:#c81e45}a{color:#0f3460}
 <select id="e" name="expiry_hours"><option value="24">24 hours</option><option value="168" selected>7 days</option><option value="720">30 days</option></select>
 <label style="cursor:pointer"><input type="checkbox" id="bar" name="burn_after_read"> 🔥 Burn after read</label>
 <input id="pw" name="password" type="password" placeholder="Password (optional)">
+<input id="tg" name="tags" placeholder="Tags (comma-separated, max 5)">
 <button type="submit">🚀 Create Paste</button>
 </form>
 <div id="r" class="recent"></div>
 <script>
 document.getElementById('f').onsubmit=async(e)=>{
 e.preventDefault();
-const d={content:document.getElementById('c').value,title:document.getElementById('t').value,syntax:document.getElementById('s').value,expiry_hours:document.getElementById('e').value,burn_after_read:document.getElementById('bar').checked,password:document.getElementById('pw').value};
+const d={content:document.getElementById('c').value,title:document.getElementById('t').value,syntax:document.getElementById('s').value,expiry_hours:document.getElementById('e').value,burn_after_read:document.getElementById('bar').checked,password:document.getElementById('pw').value,tags:document.getElementById('tg').value.split(',').map(t=>t.trim()).filter(t=>t)};
 const res=await fetch('/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
 const j=await res.json();if(j.id){if(j.delete_key){console.log('Delete key:',j.delete_key);}location.href='/'+j.id;}else alert(j.error||'Error');
 };
 const loadList=(q)=>{const url=q?'/api/list?q='+encodeURIComponent(q):'/api/list';fetch(url).then(r=>r.json()).then(d=>{
 const el=document.getElementById('r');
-if(d.pastes&&d.pastes.length){el.innerHTML='<h3>Recent</h3><input id="sq" placeholder="🔍 Search..." value="'+(q||'').replace(/"/g,'&quot;')+'" style="background:#16213e;color:#eee;border:1px solid #333;padding:6px;border-radius:4px;margin-left:8px;width:200px">'+d.pastes.map(p=>'<div><a href="/'+p.id+'">'+p.title+'</a> <small>('+p.syntax+', '+p.size+'B)</small></div>').join('');document.getElementById('sq').oninput=function(){clearTimeout(window._st);window._st=setTimeout(()=>loadList(this.value),300);};}
+if(d.pastes&&d.pastes.length){el.innerHTML='<h3>Recent</h3><input id="sq" placeholder="🔍 Search..." value="'+(q||'').replace(/"/g,'&quot;')+'" style="background:#16213e;color:#eee;border:1px solid #333;padding:6px;border-radius:4px;margin-left:8px;width:200px">'+d.pastes.map(p=>'<div><a href="/'+p.id+'">'+p.title+'</a> <small>('+p.syntax+', '+p.size+'B)'+(p.tags&&p.tags.length?' '+p.tags.map(t=>'<a href="/api/tags/'+encodeURIComponent(t)+'" style="color:#0f3460;background:#16213e;padding:2px 6px;border-radius:3px;font-size:11px;text-decoration:none">#'+t+'</a>').join(' '):'')+'</small></div>').join('');document.getElementById('sq').oninput=function(){clearTimeout(window._st);window._st=setTimeout(()=>loadList(this.value),300);};}
 });};
 loadList('');
 </script></body></html>"""
@@ -591,6 +714,13 @@ loadList('');
             burn_warning = '<div style="background:#ff9800;color:#000;padding:8px;border-radius:4px;margin-bottom:16px">🔥 Burn after read — this paste will be deleted after viewing</div>'
         # 密码标识
         password_badge = ' 🔒' if paste.get("has_password") else ''
+        # 标签显示
+        tags_html = ''
+        if paste.get("tags"):
+            tags_html = '<div style="margin-bottom:12px">' + ' '.join(
+                f'<a href="/api/tags/{t}" style="color:#0f3460;background:#16213e;padding:3px 8px;border-radius:4px;font-size:12px;text-decoration:none">#{t}</a>'
+                for t in paste["tags"]
+            ) + '</div>'
         return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{html_module.escape(paste['title'])} - PasteHut</title>
 <style>
@@ -602,6 +732,7 @@ button{{background:#16213e;color:#eee;border:1px solid #333;padding:8px 16px;bor
 </style></head><body>
 <h1>{html_module.escape(paste['title'])}{password_badge}</h1>
 {burn_warning}
+{tags_html}
 <div class="meta">
   📝 {paste['syntax']} · {paste['size']}B · 👀 {paste['views']} views · 
   📅 {paste['created_at'][:10]} · ⏰ expires {paste['expires_at'][:10]}
@@ -642,23 +773,23 @@ a{{color:#e94560}}
 <body><h1>404</h1><p>This paste doesn't exist or has expired.</p><a href="/">← Go home</a></body></html>"""
     
     def log_message(self, format, *args):
-        print(f"[PasteHut] {args[0]}")
+        log.info("%s", args[0] if args else "")
 
 
 # ============ 过期清理线程 ============
 
 def _cleanup_loop(store_instance: PasteStore):
-    """后台线程：每 10 分钟清理过期 paste"""
+    """后台线程：按配置间隔清理过期 paste（默认10分钟）"""
     while True:
         try:
             count = store_instance.cleanup_expired()
             if count:
-                print(f"[PasteHut] Cleaned up {count} expired paste(s)")
+                log.info("Cleaned up %d expired paste(s) via expiry index", count)
             # 同时 flush 残留 views
             store_instance._flush_views()
         except Exception as e:
-            print(f"[PasteHut] Cleanup error: {e}")
-        time.sleep(600)  # 10 分钟
+            log.error("Cleanup error: %s", e)
+        time.sleep(CLEANUP_INTERVAL_SECONDS)
 
 
 # ============ 入口 ============
@@ -678,15 +809,15 @@ def main():
     cleanup_thread.start()
     
     server = HTTPServer((args.host, args.port), PasteHandler)
-    print(f"📋 PasteHut running on http://{args.host}:{args.port}")
-    print(f"   Data dir: {args.data_dir}")
+    log.info("PasteHut running on http://%s:%d", args.host, args.port)
+    log.info("Data dir: %s", args.data_dir)
     
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         # 退出前 flush 残留 views
         store._flush_views()
-        print("\n👋 PasteHut stopped")
+        log.info("PasteHut stopped")
         server.server_close()
 
 
