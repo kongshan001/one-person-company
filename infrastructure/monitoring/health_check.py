@@ -179,9 +179,93 @@ def print_report(results: dict):
     print()
 
 
+def format_prometheus(results: dict) -> str:
+    """将检查结果格式化为 Prometheus 兼容的 metrics 文本格式
+
+    输出示例::
+
+        # HELP opc_system_up System overall status (1=healthy, 0=degraded)
+        # TYPE opc_system_up gauge
+        opc_system_up 1
+        # HELP opc_service_up Service status (1=up, 0=down)
+        # TYPE opc_service_up gauge
+        opc_service_up{service="PasteHut"} 1
+        opc_service_up{service="PingBot"} 1
+        # HELP opc_disk_free_bytes Free disk space in bytes
+        # TYPE opc_disk_free_bytes gauge
+        opc_disk_free_bytes 1.073741824e+10
+        # HELP opc_disk_used_pct Disk usage percentage
+        # TYPE opc_disk_used_pct gauge
+        opc_disk_used_pct 45.2
+        # HELP opc_memory_available_bytes Available memory in bytes
+        # TYPE opc_memory_available_bytes gauge
+        opc_memory_available_bytes 2.147483648e+09
+        # HELP opc_memory_used_pct Memory usage percentage
+        # TYPE opc_memory_used_pct gauge
+        opc_memory_used_pct 62.3
+        # HELP opc_load_1m System load average (1 min)
+        # TYPE opc_load_1m gauge
+        opc_load_1m 0.52
+
+    Args:
+        results: run_checks() 返回的结果字典
+
+    Returns:
+        Prometheus exposition format 文本
+    """
+    lines = []
+    status_val = 1 if results.get("overall") == "healthy" else 0
+
+    lines.append("# HELP opc_system_up System overall status (1=healthy, 0=degraded)")
+    lines.append("# TYPE opc_system_up gauge")
+    lines.append(f"opc_system_up {status_val}")
+
+    # Service status
+    lines.append("# HELP opc_service_up Service status (1=up, 0=down)")
+    lines.append("# TYPE opc_service_up gauge")
+    for name, info in results.get("services", {}).items():
+        val = 1 if info.get("status") in ("up", "ok") else 0
+        lines.append(f'opc_service_up{{service="{name}"}} {val}')
+
+    # Disk
+    disk = results.get("system", {}).get("disk", {})
+    if "free_gb" in disk:
+        free_bytes = disk["free_gb"] * (1024 ** 3)
+        lines.append("# HELP opc_disk_free_bytes Free disk space in bytes")
+        lines.append("# TYPE opc_disk_free_bytes gauge")
+        lines.append(f"opc_disk_free_bytes {free_bytes:.0f}")
+    if "used_pct" in disk:
+        lines.append("# HELP opc_disk_used_pct Disk usage percentage")
+        lines.append("# TYPE opc_disk_used_pct gauge")
+        lines.append(f"opc_disk_used_pct {disk['used_pct']}")
+
+    # Memory
+    mem = results.get("system", {}).get("memory", {})
+    if "available_mb" in mem:
+        avail_bytes = mem["available_mb"] * (1024 ** 2)
+        lines.append("# HELP opc_memory_available_bytes Available memory in bytes")
+        lines.append("# TYPE opc_memory_available_bytes gauge")
+        lines.append(f"opc_memory_available_bytes {avail_bytes:.0f}")
+    if "used_pct" in mem:
+        lines.append("# HELP opc_memory_used_pct Memory usage percentage")
+        lines.append("# TYPE opc_memory_used_pct gauge")
+        lines.append(f"opc_memory_used_pct {mem['used_pct']}")
+
+    # Load
+    load = results.get("system", {}).get("load", {})
+    if "load_1m" in load:
+        lines.append("# HELP opc_load_1m System load average (1 min)")
+        lines.append("# TYPE opc_load_1m gauge")
+        lines.append(f"opc_load_1m {load['load_1m']}")
+
+    return "\n".join(lines) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description="OnePersonCo Health Check")
     parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--prometheus", action="store_true",
+                        help="Prometheus exposition format output")
     parser.add_argument("--alert", action="store_true", help="Send alert on failure")
     args = parser.parse_args()
     
@@ -189,6 +273,8 @@ def main():
     
     if args.json:
         print(json.dumps(results, indent=2))
+    elif args.prometheus:
+        print(format_prometheus(results))
     else:
         print_report(results)
     

@@ -15,9 +15,22 @@ from http.server import BaseHTTPRequestHandler
 from typing import Optional
 
 
+__all__ = [
+    "send_cors_headers",
+    "handle_options",
+    "send_json",
+    "send_html",
+    "send_text",
+    "parse_body",
+    "sanitize_id",
+    "format_uptime",
+    "compute_percentiles",
+]
+
+
 def send_cors_headers(
     handler: BaseHTTPRequestHandler,
-    allowed_methods: str = "GET, POST, DELETE, OPTIONS",
+    allowed_methods: str = "GET, POST, PUT, DELETE, OPTIONS",
     allowed_headers: str = "Content-Type, Authorization, X-Delete-Key",
     max_age: int = 86400,
 ) -> None:
@@ -40,7 +53,7 @@ def send_cors_headers(
 
 def handle_options(
     handler: BaseHTTPRequestHandler,
-    allowed_methods: str = "GET, POST, DELETE, OPTIONS",
+    allowed_methods: str = "GET, POST, PUT, DELETE, OPTIONS",
     allowed_headers: str = "Content-Type, Authorization, X-Delete-Key",
 ) -> None:
     """处理 CORS 预检请求 (OPTIONS)

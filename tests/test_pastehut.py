@@ -173,6 +173,36 @@ class TestPasteStore(unittest.TestCase):
         result = self.store.check_rate_limit("127.0.0.1")
         self.assertTrue(result)
 
+    def test_get_stats_empty(self):
+        """Test stats with empty store"""
+        stats = self.store.get_stats()
+        self.assertEqual(stats["total_pastes"], 0)
+        self.assertEqual(stats["total_views"], 0)
+        self.assertEqual(stats["total_size_bytes"], 0)
+        self.assertEqual(stats["syntax_distribution"], {})
+        self.assertEqual(stats["burn_after_read_count"], 0)
+        self.assertEqual(stats["password_protected_count"], 0)
+
+    def test_get_stats_with_data(self):
+        """Test stats with multiple pastes"""
+        self.store.create(
+            content="hello", title="T1", syntax="python",
+            expiry_hours=24, ip="127.0.0.1",
+        )
+        self.store.create(
+            content="world", title="T2", syntax="text",
+            expiry_hours=24, ip="127.0.0.1",
+            burn_after_read=True, password="secret",
+        )
+        stats = self.store.get_stats()
+        self.assertEqual(stats["total_pastes"], 2)
+        self.assertEqual(stats["total_views"], 0)
+        self.assertGreater(stats["total_size_bytes"], 0)
+        self.assertIn("python", stats["syntax_distribution"])
+        self.assertIn("text", stats["syntax_distribution"])
+        self.assertEqual(stats["burn_after_read_count"], 1)
+        self.assertEqual(stats["password_protected_count"], 1)
+
 
 class TestPasteStoreBurnAfterRead(unittest.TestCase):
     """Test burn-after-read functionality"""

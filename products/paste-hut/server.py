@@ -58,6 +58,35 @@ class PasteStore:
         self._views_total_dirty = 0
         self._last_flush = time.time()
         self._flush_lock = Lock()
+
+    def get_stats(self) -> dict:
+        """获取 PasteHut 的聚合统计数据
+
+        Returns:
+            包含总量、视图、语法分布等统计信息的字典
+        """
+        total_pastes = len(self.meta)
+        total_views = sum(m.get("views", 0) for m in self.meta.values())
+        total_size = sum(m.get("size", 0) for m in self.meta.values())
+        # 语法分布
+        syntax_counts = {}
+        for m in self.meta.values():
+            s = m.get("syntax", "text")
+            syntax_counts[s] = syntax_counts.get(s, 0) + 1
+        # 阅后即焚数量
+        burn_count = sum(1 for m in self.meta.values() if m.get("burn_after_read"))
+        # 密码保护数量
+        password_count = sum(1 for m in self.meta.values() if m.get("has_password"))
+
+        return {
+            "total_pastes": total_pastes,
+            "total_views": total_views,
+            "total_size_bytes": total_size,
+            "total_size_kb": round(total_size / 1024, 1),
+            "syntax_distribution": syntax_counts,
+            "burn_after_read_count": burn_count,
+            "password_protected_count": password_count,
+        }
     
     def _load_meta(self) -> dict:
         if self.meta_file.exists():
@@ -357,6 +386,8 @@ class PasteHandler(BaseHTTPRequestHandler):
             self._send_html(self._render_home())
         elif path.path == "/health":
             self._send_json({"status": "ok", "pastes": len(store.meta)})
+        elif path.path == "/api/stats":
+            self._send_json(store.get_stats())
         elif path.path == "/api/list":
             query = params.get("q", [""])[0]
             pastes = store.list_recent(query=query)

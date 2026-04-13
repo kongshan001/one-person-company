@@ -131,6 +131,54 @@ class TestPingDB(unittest.TestCase):
         self.db.cleanup_old()
         # Should not raise
 
+    def test_pause_target(self):
+        """Test pausing a monitoring target"""
+        self.db.add_target(name="pause_test", url="https://example.com")
+        result = self.db.pause_target("pause_test")
+        self.assertEqual(result["name"], "pause_test")
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["action"], "paused")
+        # Verify it's disabled in DB
+        targets = self.db.get_targets(enabled_only=True)
+        names = [t["name"] for t in targets]
+        self.assertNotIn("pause_test", names)
+
+    def test_resume_target(self):
+        """Test resuming a paused monitoring target"""
+        self.db.add_target(name="resume_test", url="https://example.com")
+        self.db.pause_target("resume_test")
+        result = self.db.resume_target("resume_test")
+        self.assertEqual(result["name"], "resume_test")
+        self.assertTrue(result["enabled"])
+        self.assertEqual(result["action"], "resumed")
+        # Verify it's back in enabled targets
+        targets = self.db.get_targets(enabled_only=True)
+        names = [t["name"] for t in targets]
+        self.assertIn("resume_test", names)
+
+    def test_pause_nonexistent_target(self):
+        """Test pausing a target that doesn't exist"""
+        result = self.db.pause_target("nonexistent_xyz")
+        self.assertIn("error", result)
+
+    def test_resume_nonexistent_target(self):
+        """Test resuming a target that doesn't exist"""
+        result = self.db.resume_target("nonexistent_xyz")
+        self.assertIn("error", result)
+
+    def test_pause_resume_roundtrip(self):
+        """Test full pause/resume cycle preserves data"""
+        self.db.add_target(name="roundtrip", url="https://example.com", method="POST")
+        self.db.record_check("roundtrip", status_code=200, response_time_ms=50, is_up=True)
+        # Pause
+        self.db.pause_target("roundtrip")
+        # Resume
+        self.db.resume_target("roundtrip")
+        # Data should still be there
+        targets = self.db.get_targets()
+        target = [t for t in targets if t["name"] == "roundtrip"][0]
+        self.assertEqual(target["method"], "POST")
+
 
 class TestPinger(unittest.TestCase):
     """Test Pinger URL checking logic"""

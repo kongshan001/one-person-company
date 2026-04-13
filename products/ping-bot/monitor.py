@@ -12,6 +12,8 @@ API:
   GET  /api/history/{name} - 某个目标的历史
   POST /api/targets        - 添加监控目标
   DELETE /api/targets/{name} - 删除监控目标
+  PUT  /api/targets/{name}/pause  - 暂停监控（维护窗口）
+  PUT  /api/targets/{name}/resume - 恢复监控
   GET  /health             - 健康检查
 """
 
@@ -135,6 +137,28 @@ class PingDB:
             cursor = self.conn.execute("DELETE FROM targets WHERE name = ?", (name,))
             self.conn.commit()
             return cursor.rowcount > 0
+
+    def pause_target(self, name: str) -> dict:
+        """暂停监控目标（设置 enabled=0），用于维护窗口"""
+        with self.lock:
+            cursor = self.conn.execute(
+                "UPDATE targets SET enabled = 0 WHERE name = ?", (name,)
+            )
+            self.conn.commit()
+            if cursor.rowcount == 0:
+                return {"error": "Target not found"}
+            return {"name": name, "enabled": False, "action": "paused"}
+
+    def resume_target(self, name: str) -> dict:
+        """恢复监控目标（设置 enabled=1）"""
+        with self.lock:
+            cursor = self.conn.execute(
+                "UPDATE targets SET enabled = 1 WHERE name = ?", (name,)
+            )
+            self.conn.commit()
+            if cursor.rowcount == 0:
+                return {"error": "Target not found"}
+            return {"name": name, "enabled": True, "action": "resumed"}
     
     def get_targets(self, enabled_only: bool = False) -> list:
         query = "SELECT * FROM targets"
@@ -394,17 +418,41 @@ class PingHandler(BaseHTTPRequestHandler):
     
     def do_DELETE(self):
         path = urllib.parse.urlparse(self.path).path
-        
+
         if not self._check_auth():
             self._send_json({"error": "Unauthorized"}, 401)
             return
-        
+
         if path.startswith("/api/targets/"):
             name = path[14:]
             if db.remove_target(name):
                 self._send_json({"deleted": name})
             else:
                 self._send_json({"error": "Not found"}, 404)
+
+    def do_PUT(self):
+        path = urllib.parse.urlparse(self.path).path
+
+        if not self._check_auth():
+            self._send_json({"error": "Unauthorized"}, 401)
+            return
+
+        if path.endswith("/pause"):
+            name = path[len("/api/targets/"):-len("/pause")]
+            result = db.pause_target(name)
+            if "error" in result:
+                self._send_json(result, 404)
+            else:
+                self._send_json(result)
+        elif path.endswith("/resume"):
+            name = path[len("/api/targets/"):-len("/resume")]
+            result = db.resume_target(name)
+            if "error" in result:
+                self._send_json(result, 404)
+            else:
+                self._send_json(result)
+        else:
+            self._send_json({"error": "Not found"}, 404)
     
     def _send_dashboard(self):
         self.send_response(200)

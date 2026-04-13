@@ -80,5 +80,99 @@ class TestHealthCheckIntegration(unittest.TestCase):
             })
 
 
+class TestPrometheusFormat(unittest.TestCase):
+    """Test Prometheus exposition format output"""
+
+    @classmethod
+    def setUpClass(cls):
+        project_root = Path(__file__).parent.parent
+        import sys
+        sys.path.insert(0, str(project_root / "infrastructure" / "monitoring"))
+        import importlib
+        cls.mod = importlib.import_module("health_check")
+
+    def test_format_prometheus_healthy(self):
+        """Test Prometheus output for healthy system"""
+        results = {
+            "overall": "healthy",
+            "services": {
+                "PasteHut": {"status": "up"},
+                "PingBot": {"status": "ok"},
+            },
+            "system": {
+                "disk": {"free_gb": 10.0, "used_pct": 45.2},
+                "memory": {"available_mb": 2048.0, "used_pct": 62.3},
+                "load": {"load_1m": 0.52},
+            },
+        }
+        output = self.mod.format_prometheus(results)
+        self.assertIn("opc_system_up 1", output)
+        self.assertIn('opc_service_up{service="PasteHut"} 1', output)
+        self.assertIn('opc_service_up{service="PingBot"} 1', output)
+        self.assertIn("opc_disk_free_bytes", output)
+        self.assertIn("opc_disk_used_pct 45.2", output)
+        self.assertIn("opc_memory_available_bytes", output)
+        self.assertIn("opc_memory_used_pct 62.3", output)
+        self.assertIn("opc_load_1m 0.52", output)
+
+    def test_format_prometheus_degraded(self):
+        """Test Prometheus output for degraded system"""
+        results = {
+            "overall": "degraded",
+            "services": {
+                "PasteHut": {"status": "down"},
+            },
+            "system": {},
+        }
+        output = self.mod.format_prometheus(results)
+        self.assertIn("opc_system_up 0", output)
+        self.assertIn('opc_service_up{service="PasteHut"} 0', output)
+
+    def test_format_prometheus_empty_services(self):
+        """Test Prometheus output with no services"""
+        results = {
+            "overall": "healthy",
+            "services": {},
+            "system": {},
+        }
+        output = self.mod.format_prometheus(results)
+        self.assertIn("opc_system_up 1", output)
+        # Should still have HELP/TYPE for service_up but no data lines
+        self.assertIn("# HELP opc_service_up", output)
+
+    def test_format_prometheus_has_help_and_type(self):
+        """Test that each metric has HELP and TYPE annotations"""
+        results = {
+            "overall": "healthy",
+            "services": {"TestSvc": {"status": "up"}},
+            "system": {
+                "disk": {"free_gb": 5.0, "used_pct": 50.0},
+                "memory": {"available_mb": 1024.0, "used_pct": 40.0},
+                "load": {"load_1m": 1.0},
+            },
+        }
+        output = self.mod.format_prometheus(results)
+        # Every metric line should be preceded by # HELP and # TYPE
+        for metric in ["opc_system_up", "opc_service_up", "opc_disk_free_bytes",
+                        "opc_disk_used_pct", "opc_memory_available_bytes",
+                        "opc_memory_used_pct", "opc_load_1m"]:
+            self.assertIn(f"# HELP {metric}", output)
+            self.assertIn(f"# TYPE {metric}", output)
+
+    def test_format_prometheus_partial_system(self):
+        """Test Prometheus output with partial system info (no memory/load)"""
+        results = {
+            "overall": "healthy",
+            "services": {},
+            "system": {"disk": {"used_pct": 30.0}},
+        }
+        output = self.mod.format_prometheus(results)
+        self.assertIn("opc_system_up 1", output)
+        self.assertIn("opc_disk_used_pct 30.0", output)
+        # Should NOT have memory or load metrics
+        self.assertNotIn("opc_memory_available_bytes", output)
+        self.assertNotIn("opc_load_1m", output)
+
+
 if __name__ == "__main__":
     unittest.main()
