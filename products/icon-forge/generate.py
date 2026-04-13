@@ -33,6 +33,7 @@ from utils import read_png_dimensions
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import prompt_engine
 import quality_engine
+import cache as icon_cache_module
 
 
 # ============ 配置（引用集中配置） ============
@@ -48,6 +49,9 @@ DEFAULT_SIZE = IconForgeConfig.DEFAULT_SIZE
 MIN_FILE_SIZE = IconForgeConfig.MIN_FILE_SIZE
 DELAY_BETWEEN_REQUESTS = IconForgeConfig.DELAY_BETWEEN_REQUESTS
 MAX_RETRIES = IconForgeConfig.MAX_RETRIES
+
+# 缓存实例（模块级单例）
+_cache = icon_cache_module.IconCache()
 
 
 # ============ 核心函数 ============
@@ -84,16 +88,38 @@ def build_prompt(user_prompt: str, style: str = None, asset_type: str = "icon",
 
 
 def generate_image(prompt: str, seed: int = None, size: int = DEFAULT_SIZE,
-                   output_path: str = None) -> str:
+                   output_path: str = None, style: str = None) -> str:
     """调用 Pollinations.ai 生成单张图片
     
-    当 output_path 为 None 时，写入临时文件并返回路径 str；
-    失败返回 None。
+    优先查找缓存，命中则直接复用；未命中则调用 API 并写入缓存。
+    
+    Args:
+        prompt: 完整的生成 prompt
+        seed: 随机种子
+        size: 图片尺寸
+        output_path: 输出文件路径；None 时写入临时文件
+        style: 风格名称（用于缓存 key）
+    
+    Returns:
+        成功返回文件路径 str；失败返回 None。
     """
     import tempfile
     
     if seed is None:
         seed = int(time.time() * 1000) % 2**31
+    
+    # 缓存查找：命中则复制到目标路径
+    cached_path = _cache.get(prompt, style=style, seed=seed, size=size)
+    if cached_path is not None:
+        import shutil
+        save_path = output_path
+        if save_path is None:
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            save_path = tmp.name
+            tmp.close()
+        shutil.copy2(cached_path, save_path)
+        print(f"  💾 缓存命中 → {os.path.basename(save_path)}")
+        return save_path
     
     encoded_prompt = urllib.parse.quote(prompt)
     url = POLLINATIONS_URL.format(prompt=encoded_prompt, w=size, h=size, seed=seed)
@@ -131,6 +157,13 @@ def generate_image(prompt: str, seed: int = None, size: int = DEFAULT_SIZE,
             except (subprocess.CalledProcessError, FileNotFoundError):
                 # ImageMagick 不可用, 直接保存
                 os.rename(raw_path, save_path)
+            
+            # 写入缓存（异步不影响主流程）
+            try:
+                _cache.put(prompt, style=style, seed=seed, size=size,
+                           source_path=save_path)
+            except Exception:
+                pass  # 缓存写入失败不影响生成结果
             
             return save_path
             
@@ -276,7 +309,8 @@ def run_batch(prompts: list, style: str, asset_type: str, output_dir: str,
     os.makedirs(output_dir, exist_ok=True)
     
     manifest = []
-    stats = {"total": 0, "success": 0, "failed": 0, "quality_issues": 0}
+    stats = {"total": 0, "success": 0, "failed": 0, "quality_issues": 0,
+             "cache_hits": 0}
     existing_hashes = {}  # pHash 去重用
     
     for i, prompt_text in enumerate(prompts):
@@ -301,7 +335,8 @@ def run_batch(prompts: list, style: str, asset_type: str, output_dir: str,
             os.makedirs(raw_dir, exist_ok=True)
             raw_path = os.path.join(raw_dir, filename)
             
-            result = generate_image(full_prompt, seed=seed, output_path=raw_path)
+            result = generate_image(full_prompt, seed=seed, output_path=raw_path,
+                                    style=style)
             
             if result is None:
                 print(f"  ❌ 生成失败")
@@ -364,6 +399,11 @@ def run_batch(prompts: list, style: str, asset_type: str, output_dir: str,
     
     stats["manifest"] = manifest_path
     stats["zip"] = zip_path
+    
+    # 追加缓存统计
+    cache_stats = _cache.stats()
+    stats["cache_hits"] = cache_stats["hits"]
+    stats["cache_hit_rate"] = cache_stats["hit_rate_pct"]
     
     return stats
 
@@ -454,6 +494,7 @@ def main():
     print(f"   成功: {stats['success']}")
     print(f"   失败: {stats['failed']}")
     print(f"   质检问题: {stats['quality_issues']}")
+    print(f"   缓存命中: {stats.get('cache_hits', 0)} ({stats.get('cache_hit_rate', 0)}%)")
     print(f"   清单: {stats['manifest']}")
     print(f"   打包: {stats['zip']}")
 

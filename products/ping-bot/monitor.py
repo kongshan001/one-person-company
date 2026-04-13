@@ -173,12 +173,30 @@ class PingDB:
     def add_target(self, name: str, url: str, method: str = "GET",
                    expected_status: int = 200, expected_keyword: str = None,
                    interval: int = 60) -> dict:
-        # Validate name: only [a-zA-Z0-9_-]
+        # Validate name: only [a-zA-Z0-9_-], length 1-64
+        if not name or len(name) > 64:
+            return {"error": "name must be 1-64 characters"}
         if not re.fullmatch(r'[a-zA-Z0-9_-]+', name):
             return {"error": "name must contain only alphanumeric characters, underscores, and hyphens"}
-        # Validate url: 使用 validate_url 进行 SSRF 防护
+        # Validate url: 使用 validate_url 进行 SSRF 防护，限制长度
+        if not url or len(url) > 2048:
+            return {"error": "url must be 1-2048 characters"}
         if not validate_url(url):
             return {"error": "url must be a valid http/https URL (private/internal addresses are blocked)"}
+        # Validate interval: 10-3600 秒
+        try:
+            interval = int(interval)
+        except (TypeError, ValueError):
+            return {"error": "interval must be an integer (10-3600 seconds)"}
+        if not (10 <= interval <= 3600):
+            return {"error": "interval must be between 10 and 3600 seconds"}
+        # Validate expected_status: valid HTTP status code
+        try:
+            expected_status = int(expected_status)
+        except (TypeError, ValueError):
+            return {"error": "expected_status must be an integer"}
+        if not (100 <= expected_status <= 599):
+            return {"error": "expected_status must be a valid HTTP status code (100-599)"}
         with self.lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO targets (name, url, method, expected_status, expected_keyword, interval) VALUES (?, ?, ?, ?, ?, ?)",
@@ -188,7 +206,17 @@ class PingDB:
         return {"name": name, "url": url, "method": method}
     
     def remove_target(self, name: str) -> bool:
+        """删除监控目标，同时级联删除关联的检查记录
+
+        Args:
+            name: 目标名称
+
+        Returns:
+            是否成功删除目标
+        """
         with self.lock:
+            # 先删除关联的 checks 记录，避免孤立数据
+            self.conn.execute("DELETE FROM checks WHERE target_name = ?", (name,))
             cursor = self.conn.execute("DELETE FROM targets WHERE name = ?", (name,))
             self.conn.commit()
             return cursor.rowcount > 0

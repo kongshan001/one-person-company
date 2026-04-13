@@ -118,6 +118,41 @@ def check_process(port: int) -> dict:
         return {"status": "unknown", "port": port, "error": str(e)}
 
 
+def check_cli_service(name: str, script_path: str) -> dict:
+    """检查 CLI 工具型服务（非 HTTP 服务）
+    
+    通过验证脚本文件存在且语法正确来判断可用性。
+    
+    Args:
+        name: 服务名称
+        script_path: 入口脚本路径
+    
+    Returns:
+        检查结果字典
+    """
+    import py_compile
+    abs_path = os.path.abspath(script_path)
+    if not os.path.exists(abs_path):
+        return {
+            "status": "down",
+            "error": f"脚本不存在: {abs_path}",
+            "type": "cli",
+        }
+    try:
+        py_compile.compile(abs_path, doraise=True)
+        return {
+            "status": "up",
+            "path": abs_path,
+            "type": "cli",
+        }
+    except py_compile.PyCompileError as e:
+        return {
+            "status": "down",
+            "error": f"语法错误: {e}",
+            "type": "cli",
+        }
+
+
 # ============ 主流程 ============
 
 def run_checks() -> dict:
@@ -136,6 +171,14 @@ def run_checks() -> dict:
     ]
     for name, url in services:
         results["services"][name] = check_http(url)
+    
+    # CLI 工具型服务检查
+    base_dir = str(Path(__file__).parent.parent.parent)
+    cli_services = [
+        ("IconForge", os.path.join(base_dir, "products", "icon-forge", "generate.py")),
+    ]
+    for name, script_path in cli_services:
+        results["services"][name] = check_cli_service(name, script_path)
     
     # 系统检查
     results["system"]["disk"] = check_disk()

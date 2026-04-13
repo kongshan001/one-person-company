@@ -16,27 +16,28 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Dict, Optional, Any
 
 
 class IconCache:
     """IconForge 生成缓存"""
     
-    def __init__(self, cache_dir: str = None):
-        self.cache_dir = cache_dir or os.path.expanduser("~/.iconforge/cache")
-        self.index_path = os.path.join(self.cache_dir, "index.json")
-        self._index = {}
-        self._hits = 0
-        self._misses = 0
+    def __init__(self, cache_dir: Optional[str] = None) -> None:
+        self.cache_dir: str = cache_dir or os.path.expanduser("~/.iconforge/cache")
+        self.index_path: str = os.path.join(self.cache_dir, "index.json")
+        self._index: Dict[str, Dict[str, Any]] = {}
+        self._hits: int = 0
+        self._misses: int = 0
         os.makedirs(self.cache_dir, exist_ok=True)
         self._load_index()
     
-    def _cache_key(self, prompt: str, style: str = None, seed: int = None,
-                   size: int = 512) -> str:
+    def _cache_key(self, prompt: str, style: Optional[str] = None,
+                   seed: Optional[int] = None, size: int = 512) -> str:
         """生成缓存 key"""
         raw = f"{prompt}|{style}|{seed}|{size}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
     
-    def _load_index(self):
+    def _load_index(self) -> None:
         """加载缓存索引"""
         if os.path.exists(self.index_path):
             try:
@@ -45,13 +46,13 @@ class IconCache:
             except (json.JSONDecodeError, IOError):
                 self._index = {}
     
-    def _save_index(self):
+    def _save_index(self) -> None:
         """保存缓存索引"""
         with open(self.index_path, "w") as f:
             json.dump(self._index, f, indent=2)
     
-    def get(self, prompt: str, style: str = None, seed: int = None,
-            size: int = 512) -> str:
+    def get(self, prompt: str, style: Optional[str] = None,
+            seed: Optional[int] = None, size: int = 512) -> Optional[str]:
         """
         查找缓存
         
@@ -78,9 +79,10 @@ class IconCache:
         self._misses += 1
         return None
     
-    def put(self, prompt: str, style: str = None, seed: int = None,
-            size: int = 512, source_path: str = None, data: bytes = None,
-            ttl: int = 0) -> str:
+    def put(self, prompt: str, style: Optional[str] = None,
+            seed: Optional[int] = None, size: int = 512,
+            source_path: Optional[str] = None, data: Optional[bytes] = None,
+            ttl: int = 0) -> Optional[str]:
         """
         存入缓存
         
@@ -115,7 +117,7 @@ class IconCache:
         self._save_index()
         return cache_file
     
-    def _evict(self, key: str):
+    def _evict(self, key: str) -> None:
         """清除单个缓存"""
         if key in self._index:
             cache_file = os.path.join(self.cache_dir, key + ".png")
@@ -124,8 +126,15 @@ class IconCache:
             del self._index[key]
             self._save_index()
     
-    def cleanup(self, max_age_days: int = 30):
-        """清理过期缓存"""
+    def cleanup(self, max_age_days: int = 30) -> int:
+        """清理过期缓存
+        
+        Args:
+            max_age_days: 最大保留天数
+        
+        Returns:
+            被清理的缓存条目数
+        """
         now = time.time()
         cutoff = now - (max_age_days * 86400)
         evicted = 0
@@ -144,7 +153,7 @@ class IconCache:
         
         return evicted
     
-    def stats(self) -> dict:
+    def stats(self) -> Dict[str, Any]:
         """缓存统计"""
         total = self._hits + self._misses
         hit_rate = (self._hits / total * 100) if total else 0

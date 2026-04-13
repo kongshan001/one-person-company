@@ -9,6 +9,8 @@ IconForge Prompt 模板库
 - 风格一致性锚点 (同批次保持统一风格)
 """
 
+from typing import Dict, List, Optional, Any
+
 # ============ 专业 Prompt 结构 ============
 
 PROMPT_STRUCTURE = {
@@ -266,15 +268,22 @@ PRESETS = {
 
 def build_pro_prompt(
     user_prompt: str,
-    style: str = None,
+    style: Optional[str] = None,
     asset_type: str = "icon",
     use_negative: bool = True,
     use_anchor: bool = True,
-) -> dict:
+) -> Dict[str, Any]:
     """
     构建专业级文生图 prompt
     
-    返回:
+    Args:
+        user_prompt: 用户原始描述
+        style: 风格名称（如 pixel, dark, cartoon 等）
+        asset_type: 资产类型（如 icon, sprite, card 等）
+        use_negative: 是否附加负面 prompt
+        use_anchor: 是否附加风格一致性锚点
+    
+    Returns:
         {
             "prompt": "完整正面 prompt",
             "negative": "负面 prompt",
@@ -310,16 +319,30 @@ def build_pro_prompt(
     }
 
 
-def get_preset(preset_name: str) -> dict:
-    """获取预设方案"""
+def get_preset(preset_name: str) -> Dict[str, Any]:
+    """获取预设方案
+    
+    Args:
+        preset_name: 预设方案名称
+    
+    Returns:
+        预设方案字典
+    
+    Raises:
+        ValueError: 预设名称不存在时
+    """
     if preset_name not in PRESETS:
         available = ", ".join(PRESETS.keys())
         raise ValueError(f"预设 '{preset_name}' 不存在。可用: {available}")
     return PRESETS[preset_name]
 
 
-def list_presets() -> list:
-    """列出所有可用预设"""
+def list_presets() -> List[Dict[str, Any]]:
+    """列出所有可用预设
+    
+    Returns:
+        预设摘要列表，每项包含 id, name, description, style, asset_type, item_count
+    """
     result = []
     for key, preset in PRESETS.items():
         result.append({

@@ -222,10 +222,23 @@ class PasteStore:
         return True
     
     @staticmethod
-    def _hash_password(password: str) -> str:
-        """对密码进行 SHA-256 哈希（加盐）"""
-        salt = "pastehut_salt_2024"
-        return hashlib.sha256((salt + password).encode()).hexdigest()
+    def _hash_password(password: str, salt: str = "") -> str:
+        """Hash password with per-paste random salt for secure storage
+
+        使用每个粘贴独立的随机盐值，防止彩虹表攻击。
+        如果未提供盐值，自动生成随机盐（新建粘贴时）。
+
+        Args:
+            password: 原始密码
+            salt: 盐值，为空时自动生成
+
+        Returns:
+            "salt$hash" 格式的字符串
+        """
+        if not salt:
+            salt = os.urandom(16).hex()
+        h = hashlib.sha256((salt + password).encode()).hexdigest()
+        return f"{salt}${h}"
     
     def create(self, content: str, title: str = "", syntax: str = "text",
                expiry_hours: int = None, ip: str = "unknown",
@@ -248,6 +261,10 @@ class PasteStore:
         """
         if len(content) > MAX_PASTE_SIZE:
             return {"error": f"内容超过限制 ({MAX_PASTE_SIZE // 1024}KB)"}
+        
+        # 校验 title 长度
+        if title and len(title) > 200:
+            return {"error": "标题长度不能超过200字符"}
         
         if expiry_hours is None:
             expiry_hours = DEFAULT_EXPIRY_HOURS
