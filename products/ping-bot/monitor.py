@@ -52,10 +52,36 @@ ALERT_WEBHOOK_URL = PingBotConfig.ALERT_WEBHOOK_URL
 
 # ============ 告警通知 ============
 
-def send_alert(target_name: str, url: str, error: str):
-    """POST JSON 告警到 webhook URL"""
+# 告警节流：每个 target 的最近告警时间，防止告警风暴
+_alert_cooldown_seconds = 300  # 默认5分钟冷却
+_last_alert_time: dict = {}  # {target_name: timestamp}
+
+
+def send_alert(target_name: str, url: str, error: str, cooldown: int = None) -> bool:
+    """POST JSON 告警到 webhook URL，支持冷却期节流
+
+    同一 target 在冷却期内不会重复发送告警，防止告警风暴。
+
+    Args:
+        target_name: 目标名称
+        url: 目标 URL
+        error: 错误信息
+        cooldown: 冷却秒数，默认使用 _alert_cooldown_seconds
+
+    Returns:
+        True 表示告警已发送，False 表示被节流跳过
+    """
     if not ALERT_WEBHOOK_URL:
-        return
+        return False
+
+    # 冷却期检查
+    if cooldown is None:
+        cooldown = _alert_cooldown_seconds
+    now = time.time()
+    last = _last_alert_time.get(target_name, 0)
+    if now - last < cooldown:
+        return False  # 冷却期内，跳过
+
     try:
         payload = json.dumps({
             "alert": "service_down",
@@ -72,8 +98,33 @@ def send_alert(target_name: str, url: str, error: str):
         )
         with urllib.request.urlopen(req, timeout=10):
             pass
+        _last_alert_time[target_name] = now
+        return True
     except Exception as e:
         print(f"[PingBot] Alert webhook failed: {e}")
+        return False
+
+
+def set_alert_cooldown(seconds: int):
+    """设置告警冷却时间（秒）
+
+    Args:
+        seconds: 冷却秒数，最小60秒
+    """
+    global _alert_cooldown_seconds
+    _alert_cooldown_seconds = max(60, seconds)
+
+
+def reset_alert_cooldown(target_name: str = None):
+    """重置告警冷却计时器
+
+    Args:
+        target_name: 指定目标名称，None 则重置全部
+    """
+    if target_name:
+        _last_alert_time.pop(target_name, None)
+    else:
+        _last_alert_time.clear()
 
 
 # ============ 数据库 ============
@@ -310,9 +361,12 @@ class Pinger:
                 t["url"], t["method"], t["expected_status"], t["expected_keyword"]
             )
             self.db.record_check(t["name"], **result)
-            # 服务 down 时发送告警
+            # 服务 down 时发送告警（受冷却期节流）
             if not result["is_up"] and result.get("error"):
                 send_alert(t["name"], t["url"], result["error"])
+            elif result["is_up"]:
+                # 服务恢复时重置该目标的告警冷却，确保下次 down 时能立即告警
+                reset_alert_cooldown(t["name"])
     
     def start_loop(self):
         """后台循环检查"""

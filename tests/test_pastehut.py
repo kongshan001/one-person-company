@@ -133,14 +133,66 @@ class TestPasteStore(unittest.TestCase):
         self.store.create(content="paste1", title="First", syntax="text", expiry_hours=24, ip="127.0.0.1")
         self.store.create(content="paste2", title="Second", syntax="python", expiry_hours=24, ip="127.0.0.1")
         result = self.store.list_recent(limit=10)
-        self.assertEqual(len(result), 2)
+        self.assertIn("pastes", result)
+        self.assertEqual(len(result["pastes"]), 2)
+        self.assertEqual(result["total"], 2)
 
     def test_list_pastes_limit(self):
         """Test list limit"""
         for i in range(5):
             self.store.create(content=f"paste{i}", title=f"Title{i}", syntax="text", expiry_hours=24, ip="127.0.0.1")
         result = self.store.list_recent(limit=3)
-        self.assertEqual(len(result), 3)
+        self.assertEqual(len(result["pastes"]), 3)
+        self.assertEqual(result["total"], 5)
+
+    def test_list_pastes_pagination_offset(self):
+        """Test list pagination with offset"""
+        for i in range(5):
+            self.store.create(content=f"paste{i}", title=f"Title{i}", syntax="text", expiry_hours=24, ip="127.0.0.1")
+        result = self.store.list_recent(limit=2, offset=0)
+        self.assertEqual(len(result["pastes"]), 2)
+        self.assertEqual(result["total"], 5)
+        self.assertEqual(result["offset"], 0)
+        # Second page
+        result2 = self.store.list_recent(limit=2, offset=2)
+        self.assertEqual(len(result2["pastes"]), 2)
+        self.assertEqual(result2["offset"], 2)
+        # IDs should be different
+        ids_page1 = {p["id"] for p in result["pastes"]}
+        ids_page2 = {p["id"] for p in result2["pastes"]}
+        self.assertEqual(len(ids_page1 & ids_page2), 0)
+
+    def test_list_pastes_sort_by_views(self):
+        """Test sorting by views"""
+        # Create 3 pastes, view one of them multiple times
+        p1 = self.store.create(content="a", title="A", syntax="text", expiry_hours=24, ip="127.0.0.1")
+        p2 = self.store.create(content="b", title="B", syntax="text", expiry_hours=24, ip="127.0.0.1")
+        p3 = self.store.create(content="c", title="C", syntax="text", expiry_hours=24, ip="127.0.0.1")
+        # View p2 twice to give it more views
+        self.store.get(p2["id"])
+        self.store.get(p2["id"])
+        # Sort by views desc
+        result = self.store.list_recent(sort_by="views", sort_order="desc")
+        self.assertEqual(result["sort_by"], "views")
+        self.assertEqual(result["sort_order"], "desc")
+        # First paste should have most views
+        self.assertEqual(result["pastes"][0]["id"], p2["id"])
+
+    def test_list_pastes_sort_invalid_field(self):
+        """Test that invalid sort field defaults to created_at"""
+        result = self.store.list_recent(sort_by="invalid_field")
+        self.assertEqual(result["sort_by"], "created_at")
+
+    def test_list_pastes_pagination_metadata(self):
+        """Test pagination metadata in response"""
+        self.store.create(content="x", title="X", syntax="text", expiry_hours=24, ip="127.0.0.1")
+        result = self.store.list_recent(limit=5, offset=0, sort_by="created_at", sort_order="asc")
+        self.assertIn("pastes", result)
+        self.assertIn("total", result)
+        self.assertIn("offset", result)
+        self.assertIn("limit", result)
+        self.assertIn("sort_by", result)
+        self.assertIn("sort_order", result)
 
     def test_cleanup_expired(self):
         """Test expired paste cleanup"""
@@ -392,7 +444,8 @@ class TestPasteStorePassword(unittest.TestCase):
             ip="127.0.0.1",
             password="testpw",
         )
-        pastes = self.store.list_recent()
+        result = self.store.list_recent()
+        pastes = result["pastes"]
         self.assertEqual(len(pastes), 1)
         self.assertNotIn("password_hash", pastes[0])
         self.assertNotIn("delete_key", pastes[0])

@@ -329,31 +329,66 @@ class PasteStore:
         
         return len(expired)
     
-    def list_recent(self, limit: int = 20, query: str = "") -> list:
-        """列出最近的 paste（不含敏感字段）
+    def list_recent(self, limit: int = 20, query: str = "",
+                    offset: int = 0, sort_by: str = "created_at",
+                    sort_order: str = "desc") -> dict:
+        """列出最近的 paste（不含敏感字段），支持分页和排序
 
         Args:
             limit: 返回数量上限
             query: 搜索关键词，匹配标题（不区分大小写），为空则不过滤
+            offset: 分页偏移量，从0开始
+            sort_by: 排序字段，可选 created_at 或 views
+            sort_order: 排序方向，desc 降序 / asc 升序
 
         Returns:
-            安全字段列表
+            包含 pastes 列表、total 总数、offset、limit 的分页字典
         """
-        pastes = sorted(
-            self.meta.values(),
-            key=lambda x: x["created_at"],
-            reverse=True,
-        )
+        # 校验排序字段
+        allowed_sort = {"created_at", "views"}
+        if sort_by not in allowed_sort:
+            sort_by = "created_at"
+        # 校验排序方向
+        if sort_order not in ("desc", "asc"):
+            sort_order = "desc"
+
+        pastes = list(self.meta.values())
+
         # 搜索过滤
         if query and query.strip():
             q = query.strip().lower()
             pastes = [p for p in pastes if q in p.get("title", "").lower()]
+
+        total = len(pastes)
+
+        # 排序 — views 排序需包含脏计数
+        reverse = (sort_order == "desc")
+        if sort_by == "views":
+            pastes.sort(key=lambda x: x.get("views", 0) + self._views_dirty.get(x.get("id", ""), 0), reverse=reverse)
+        else:
+            pastes.sort(key=lambda x: x.get(sort_by, ""), reverse=reverse)
+
+        # 分页
+        page_pastes = pastes[offset:offset + limit]
+
         # 过滤敏感字段
         safe_fields = {"id", "title", "syntax", "size", "created_at", "expires_at", "views", "burn_after_read", "has_password"}
         result = []
-        for p in pastes[:limit]:
-            result.append({k: v for k, v in p.items() if k in safe_fields})
-        return result
+        for p in page_pastes:
+            # views 需包含脏计数
+            current_views = p.get("views", 0) + self._views_dirty.get(p.get("id", ""), 0)
+            item = {k: v for k, v in p.items() if k in safe_fields}
+            item["views"] = current_views
+            result.append(item)
+
+        return {
+            "pastes": result,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+        }
 
 
 # ============ HTTP 服务 ============
@@ -390,8 +425,23 @@ class PasteHandler(BaseHTTPRequestHandler):
             self._send_json(store.get_stats())
         elif path.path == "/api/list":
             query = params.get("q", [""])[0]
-            pastes = store.list_recent(query=query)
-            self._send_json({"pastes": pastes})
+            try:
+                limit = int(params.get("limit", ["20"])[0])
+                limit = max(1, min(limit, 100))  # 限制1-100
+            except (ValueError, IndexError):
+                limit = 20
+            try:
+                offset = int(params.get("offset", ["0"])[0])
+                offset = max(0, offset)
+            except (ValueError, IndexError):
+                offset = 0
+            sort_by = params.get("sort", ["created_at"])[0]
+            sort_order = params.get("order", ["desc"])[0]
+            result = store.list_recent(
+                limit=limit, query=query, offset=offset,
+                sort_by=sort_by, sort_order=sort_order,
+            )
+            self._send_json(result)
         elif path.path.startswith("/raw/"):
             paste_id = path.path[5:]
             if not sanitize_id(paste_id):

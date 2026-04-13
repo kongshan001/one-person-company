@@ -235,5 +235,133 @@ class TestPinger(unittest.TestCase):
             self.assertFalse(result["is_up"])
 
 
+class TestAlertThrottle(unittest.TestCase):
+    """Test alert cooldown/throttle functionality"""
+
+    @classmethod
+    def setUpClass(cls):
+        project_root = Path(__file__).parent.parent
+        import sys
+        sys.path.insert(0, str(project_root / "products" / "ping-bot"))
+        import importlib
+        cls.monitor_module = importlib.import_module("monitor")
+
+    def setUp(self):
+        """Reset alert state before each test"""
+        self.monitor_module.reset_alert_cooldown()
+
+    def test_send_alert_returns_false_when_no_webhook(self):
+        """Test that send_alert returns False when no webhook URL configured"""
+        result = self.monitor_module.send_alert("test", "http://example.com", "error")
+        self.assertFalse(result)
+
+    def test_set_alert_cooldown_minimum(self):
+        """Test that cooldown has minimum of 60 seconds"""
+        self.monitor_module.set_alert_cooldown(10)  # Try setting below minimum
+        self.assertEqual(self.monitor_module._alert_cooldown_seconds, 60)
+
+    def test_set_alert_cooldown_valid(self):
+        """Test setting a valid cooldown value"""
+        self.monitor_module.set_alert_cooldown(120)
+        self.assertEqual(self.monitor_module._alert_cooldown_seconds, 120)
+        # Reset to default
+        self.monitor_module.set_alert_cooldown(300)
+
+    def test_reset_alert_cooldown_specific_target(self):
+        """Test resetting cooldown for a specific target"""
+        # Simulate that an alert was sent
+        self.monitor_module._last_alert_time["my-target"] = time.time()
+        self.monitor_module.reset_alert_cooldown("my-target")
+        self.assertNotIn("my-target", self.monitor_module._last_alert_time)
+
+    def test_reset_alert_cooldown_all(self):
+        """Test resetting all cooldown timers"""
+        self.monitor_module._last_alert_time["a"] = time.time()
+        self.monitor_module._last_alert_time["b"] = time.time()
+        self.monitor_module.reset_alert_cooldown()
+        self.assertEqual(len(self.monitor_module._last_alert_time), 0)
+
+
+class TestExportData(unittest.TestCase):
+    """Test export_data module"""
+
+    @classmethod
+    def setUpClass(cls):
+        project_root = Path(__file__).parent.parent
+        import sys
+        sys.path.insert(0, str(project_root / "infrastructure" / "cron"))
+        import importlib
+        cls.export_module = importlib.import_module("export_data")
+
+    def test_export_pastehut_no_data(self):
+        """Test export when no PasteHut data exists"""
+        result = self.export_module.export_pastehut(Path("/tmp/nonexistent_export_dir_12345"))
+        self.assertEqual(result["status"], "no_data")
+        self.assertEqual(result["records"], 0)
+
+    def test_export_pingbot_no_data(self):
+        """Test export when no PingBot data exists"""
+        result = self.export_module.export_pingbot(Path("/tmp/nonexistent_export_dir_12345"))
+        self.assertEqual(result["status"], "no_data")
+        self.assertEqual(result["records"], 0)
+
+    def test_export_pastehut_with_data(self):
+        """Test exporting PasteHut data with actual pastes"""
+        # Import PasteStore to create test data
+        project_root = Path(__file__).parent.parent
+        import sys
+        sys.path.insert(0, str(project_root / "products" / "paste-hut"))
+        import importlib
+        server_mod = importlib.import_module("server")
+        PasteStore = server_mod.PasteStore
+
+        test_dir = tempfile.mkdtemp(prefix="export_test_ph_")
+        try:
+            store = PasteStore(test_dir)
+            store.create(content="hello", title="Test", syntax="text", expiry_hours=24, ip="127.0.0.1")
+
+            # Override DATA_DIR temporarily
+            original_dir = self.export_module.PasteHutConfig.DATA_DIR
+            self.export_module.PasteHutConfig.DATA_DIR = test_dir
+
+            output_dir = Path(tempfile.mkdtemp(prefix="export_out_"))
+            result = self.export_module.export_pastehut(output_dir, pretty=True)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["records"], 1)
+            self.assertTrue(os.path.exists(result["file"]))
+
+            # Verify JSON content
+            with open(result["file"], "r") as f:
+                import json
+                data = json.load(f)
+            self.assertEqual(data["total_pastes"], 1)
+            self.assertEqual(data["pastes"][0]["title"], "Test")
+
+            # Cleanup
+            shutil.rmtree(str(output_dir), ignore_errors=True)
+            self.export_module.PasteHutConfig.DATA_DIR = original_dir
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+    def test_compress_file(self):
+        """Test gzip compression"""
+        import gzip
+        test_file = tempfile.mktemp(suffix=".json")
+        with open(test_file, "w") as f:
+            f.write('{"test": true}')
+        try:
+            gz_path = self.export_module.compress_file(test_file)
+            self.assertTrue(gz_path.endswith(".gz"))
+            self.assertTrue(os.path.exists(gz_path))
+            self.assertFalse(os.path.exists(test_file))  # Original deleted
+            # Verify content
+            with gzip.open(gz_path, "rt") as f:
+                self.assertEqual(f.read(), '{"test": true}')
+            os.unlink(gz_path)
+        except Exception:
+            if os.path.exists(test_file):
+                os.unlink(test_file)
+
+
 if __name__ == "__main__":
     unittest.main()

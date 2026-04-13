@@ -261,27 +261,140 @@ def format_prometheus(results: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def serve_http(port: int = 9100, host: str = "0.0.0.0"):
+    """以 HTTP 服务模式运行，暴露 JSON 和 Prometheus 指标端点
+
+    端点:
+      GET /health         - JSON 格式健康状态
+      GET /metrics        - Prometheus exposition format
+      GET /               - 人类可读仪表盘
+
+    Args:
+        port: 监听端口，默认 9100（Prometheus node_exporter 兼容）
+        host: 监听地址，默认 0.0.0.0
+    """
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import urllib.parse
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        """健康检查 HTTP Handler"""
+
+        def do_GET(self):
+            path = urllib.parse.urlparse(self.path).path
+            results = run_checks()
+
+            if path == "/health":
+                self._send_json(results)
+            elif path == "/metrics":
+                prom_text = format_prometheus(results)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(prom_text.encode())
+            elif path == "/":
+                self._send_dashboard(results)
+            else:
+                self._send_json({"error": "Not found"}, 404)
+
+        def _send_json(self, data: dict, status: int = 200):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+
+        def _send_dashboard(self, results: dict):
+            status_emoji = {"healthy": "✅", "degraded": "⚠️", "down": "❌", "ok": "✅", "warning": "⚠️", "up": "🟢", "error": "🔴"}
+            emoji = status_emoji.get(results["overall"], "❓")
+            html_parts = [
+                "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+                "<title>OnePersonCo Health</title>",
+                "<style>",
+                "body{font-family:system-ui;background:#1a1a2e;color:#eee;max-width:900px;margin:40px auto;padding:20px}",
+                "h1{color:#e94560}table{width:100%;border-collapse:collapse;margin:16px 0}",
+                "th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #333}",
+                "th{background:#0f3460;color:#eee}.up{color:#2ecc71}.down{color:#e74c3c}",
+                ".card{background:#16213e;padding:20px;border-radius:8px;margin:12px 0}",
+                "a{color:#e94560}footer{color:#888;margin-top:32px;text-align:center}",
+                "</style></head><body>",
+                f"<h1>{emoji} OnePersonCo Health Dashboard</h1>",
+                f"<p>Status: <strong>{results['overall'].upper()}</strong> | Host: {results['hostname']} | Time: {results['timestamp']}</p>",
+            ]
+            # Services table
+            if results.get("services"):
+                html_parts.append("<div class='card'><h2>📡 Services</h2><table><tr><th>Service</th><th>Status</th><th>Detail</th></tr>")
+                for name, info in results["services"].items():
+                    s = status_emoji.get(info["status"], "❓")
+                    detail = f"HTTP {info.get('code', '?')}" if "code" in info else info.get("error", "unknown")
+                    cls = "up" if info["status"] in ("up", "ok") else "down"
+                    html_parts.append(f"<tr><td>{name}</td><td class='{cls}'>{s} {info['status']}</td><td>{detail}</td></tr>")
+                html_parts.append("</table></div>")
+            # System table
+            if results.get("system"):
+                html_parts.append("<div class='card'><h2>💻 System</h2><table><tr><th>Metric</th><th>Value</th></tr>")
+                for name, info in results["system"].items():
+                    s = status_emoji.get(info.get("status", "ok"), "❓")
+                    if name == "disk":
+                        html_parts.append(f"<tr><td>{s} Disk</td><td>{info.get('free_gb','?')}GB free / {info.get('total_gb','?')}GB ({info.get('used_pct','?')}% used)</td></tr>")
+                    elif name == "memory":
+                        html_parts.append(f"<tr><td>{s} Memory</td><td>{info.get('available_mb','?')}MB free / {info.get('total_mb','?')}MB ({info.get('used_pct','?')}% used)</td></tr>")
+                    elif name == "load":
+                        html_parts.append(f"<tr><td>{s} Load</td><td>{info.get('load_1m','?')} / {info.get('load_5m','?')} / {info.get('load_15m','?')} ({info.get('cpu_count','?')} CPUs)</td></tr>")
+                html_parts.append("</table></div>")
+            html_parts.append("<footer><a href='/health'>JSON</a> | <a href='/metrics'>Prometheus</a> | Auto-refresh: 30s</footer>")
+            html_parts.append("<script>setTimeout(()=>location.reload(),30000)</script>")
+            html_parts.append("</body></html>")
+            html = "\n".join(html_parts)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(html.encode())
+
+        def log_message(self, format, *args):
+            print(f"[HealthCheck] {args[0]}")
+
+    server = HTTPServer((host, port), HealthHandler)
+    print(f"🏥 Health Check HTTP server on http://{host}:{port}")
+    print(f"   Endpoints: /health (JSON) | /metrics (Prometheus) | / (Dashboard)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n👋 Health Check server stopped")
+        server.server_close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="OnePersonCo Health Check")
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--prometheus", action="store_true",
                         help="Prometheus exposition format output")
     parser.add_argument("--alert", action="store_true", help="Send alert on failure")
+    parser.add_argument("--serve", action="store_true",
+                        help="Run as HTTP server (expose /health, /metrics, /)")
+    parser.add_argument("--port", type=int, default=9100,
+                        help="HTTP server port (default: 9100, used with --serve)")
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="HTTP server host (default: 0.0.0.0, used with --serve)")
     args = parser.parse_args()
-    
+
+    if args.serve:
+        serve_http(port=args.port, host=args.host)
+        return
+
     results = run_checks()
-    
+
     if args.json:
         print(json.dumps(results, indent=2))
     elif args.prometheus:
         print(format_prometheus(results))
     else:
         print_report(results)
-    
+
     if args.alert and results["overall"] != "healthy":
         # TODO: 发送飞书/Telegram告警
         print("⚠️ Alert: system is not healthy!")
-    
+
     sys.exit(0 if results["overall"] == "healthy" else 1)
 
 
